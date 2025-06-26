@@ -35,29 +35,38 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// Simplified company name extraction (no external libraries)
-function extractCompanyNameSimple(filename) {
-  // For now, we'll extract from filename or return a test name
-  // This is a minimal version to get deployment working
-  const testNames = [
-    "Test Company LLC",
-    "Sample Corporation", 
-    "Demo Industries Inc.",
-    "Example Solutions Ltd."
+// Simple company name extraction from filename
+function extractCompanyName(filename) {
+  // Extract company name patterns from filename
+  const cleanName = filename.replace(/\.(pdf|docx?|txt)$/i, '');
+  
+  // Look for common company suffixes in filename
+  const patterns = [
+    /(.*?)\s*(LLC|Corp|Inc|Ltd|Company|Co)$/i,
+    /(.+)/  // fallback to entire cleaned filename
   ];
   
-  return testNames[Math.floor(Math.random() * testNames.length)];
+  for (const pattern of patterns) {
+    const match = cleanName.match(pattern);
+    if (match && match[1] && match[1].trim().length > 2) {
+      return match[1].trim() + (match[2] ? ` ${match[2]}` : ' LLC');
+    }
+  }
+  
+  return `${cleanName} LLC` || 'Test Company LLC';
 }
 
-// Simple HubSpot update (using fetch instead of SDK)
-async function updateHubSpotCompanySimple(companyId, companyName) {
+// HubSpot API update using fetch
+async function updateHubSpotCompany(companyId, companyName) {
   const token = process.env.HUBSPOT_ACCESS_TOKEN;
   
   if (!token) {
     throw new Error('HubSpot access token not configured');
   }
 
-  const response = await fetch(`https://api.hubapi.com/crm/v3/objects/companies/${companyId}`, {
+  const url = `https://api.hubapi.com/crm/v3/objects/companies/${companyId}`;
+  
+  const response = await fetch(url, {
     method: 'PATCH',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -71,8 +80,8 @@ async function updateHubSpotCompanySimple(companyId, companyName) {
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`HubSpot API error: ${response.status} - ${error}`);
+    const errorText = await response.text();
+    throw new Error(`HubSpot API error: ${response.status} - ${errorText}`);
   }
 
   return await response.json();
@@ -81,6 +90,8 @@ async function updateHubSpotCompanySimple(companyId, companyName) {
 // Routes
 app.post('/api/upload-document', upload.single('document'), async (req, res) => {
   try {
+    console.log('Upload request received');
+    
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
@@ -91,35 +102,42 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
     }
 
     console.log('File uploaded:', req.file.originalname);
+    console.log('Company ID:', companyId);
 
-    // For now, use simple extraction (we'll add PDF parsing after deployment works)
-    const companyName = extractCompanyNameSimple(req.file.originalname);
+    // Extract company name from filename (simple version)
+    const companyName = extractCompanyName(req.file.originalname);
     
     console.log('Extracted company name:', companyName);
 
     // Update HubSpot company
-    const updatedCompany = await updateHubSpotCompanySimple(companyId, companyName);
+    const updatedCompany = await updateHubSpotCompany(companyId, companyName);
 
     // Clean up uploaded file
-    fs.unlinkSync(req.file.path);
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
 
     res.json({
       success: true,
       extractedName: companyName,
       companyId: companyId,
-      hubspotResponse: updatedCompany,
-      note: "Using simplified extraction - PDF parsing will be added after deployment"
+      filename: req.file.originalname,
+      hubspotResponse: updatedCompany ? 'Updated successfully' : 'Update completed',
+      note: "Extracting from filename - PDF parsing coming soon!"
     });
 
   } catch (error) {
     console.error('Error processing document:', error);
     
     // Clean up file if it exists
-    if (req.file && fs.existsSync(req.file.path)) {
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Check server logs for more information'
+    });
   }
 });
 
@@ -127,11 +145,12 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'BT Company Extractor API is running',
+    message: 'BT Company Extractor API is running on Render!',
     timestamp: new Date().toISOString(),
     env: {
       hasHubSpotToken: !!process.env.HUBSPOT_ACCESS_TOKEN,
-      nodeVersion: process.version
+      nodeVersion: process.version,
+      platform: 'Render'
     }
   });
 });
@@ -140,14 +159,26 @@ app.get('/api/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: 'BT Company Name Extractor API',
-    status: 'Running',
+    status: 'Running on Render',
     endpoints: [
       'GET /api/health - Health check',
       'POST /api/upload-document - Extract company name from document'
-    ]
+    ],
+    usage: 'Upload a document with company name in filename for extraction'
+  });
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Global error handler:', error);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: error.message 
   });
 });
 
 app.listen(PORT, () => {
   console.log(`BT Company Extractor server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`HubSpot token configured: ${!!process.env.HUBSPOT_ACCESS_TOKEN}`);
 });
