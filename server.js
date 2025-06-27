@@ -1,3 +1,4 @@
+// server.js - Version 3.2.1 - Enhanced PDF Parsing (OCR-Ready but Optional)
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
