@@ -1,4 +1,4 @@
-// server.js - Version 3.3.0 - With OCR Support for Scanned PDFs
+// server.js - Version 3.2.1 - Enhanced PDF Parsing (OCR-Ready but Optional)
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -8,17 +8,29 @@ const path = require('path');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 
-// OCR Dependencies - Install these: npm install tesseract.js pdf2pic sharp
-const Tesseract = require('tesseract.js');
-const pdf2pic = require('pdf2pic');
-const sharp = require('sharp');
+// OCR Dependencies - These are optional and will be checked at runtime
+let Tesseract, pdf2pic, sharp;
+let ocrAvailable = false;
+
+try {
+  Tesseract = require('tesseract.js');
+  pdf2pic = require('pdf2pic');
+  sharp = require('sharp');
+  ocrAvailable = true;
+  console.log('✅ OCR dependencies loaded successfully');
+} catch (error) {
+  console.log('⚠️ OCR dependencies not available:', error.message);
+  console.log('📝 To enable OCR for scanned PDFs, install: npm install tesseract.js pdf2pic sharp');
+  ocrAvailable = false;
+}
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting BT Company Extractor v3.3.0 with OCR Support for Scanned PDFs');
+console.log('🚀 Starting BT Company Extractor v3.2.1 with Enhanced PDF Parsing');
+console.log(`🔍 OCR Support: ${ocrAvailable ? 'ENABLED' : 'DISABLED (install dependencies to enable)'}`);
 
 // Middleware
 app.use(cors());
@@ -33,7 +45,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
-  console.log('📁 Created temp directory for OCR processing');
+  console.log('📁 Created temp directory');
 }
 
 // Configure multer
@@ -49,17 +61,22 @@ const upload = multer({
     const allowedTypes = [
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/msword',
-      'image/png',
-      'image/jpeg',
-      'image/jpg'
+      'application/msword'
     ];
+    // Add image types only if OCR is available
+    if (ocrAvailable) {
+      allowedTypes.push('image/png', 'image/jpeg', 'image/jpg');
+    }
     cb(null, allowedTypes.includes(file.mimetype));
   }
 });
 
-// OCR processing function for scanned PDFs and images
+// OCR processing function (only if dependencies are available)
 async function performOCR(filePath, mimetype) {
+  if (!ocrAvailable) {
+    throw new Error('OCR dependencies not installed. Install with: npm install tesseract.js pdf2pic sharp');
+  }
+
   console.log('🔍 Starting OCR processing for:', path.basename(filePath));
   
   try {
@@ -68,17 +85,15 @@ async function performOCR(filePath, mimetype) {
     if (mimetype === 'application/pdf') {
       console.log('📄 Converting PDF pages to images for OCR...');
       
-      // Convert PDF to images
       const convert = pdf2pic.fromPath(filePath, {
-        density: 300,           // DPI - higher = better quality
+        density: 300,
         saveFilename: "page",
         savePath: tempDir,
         format: "png",
-        width: 2000,           // High resolution for better OCR
+        width: 2000,
         height: 2000
       });
       
-      // Convert first 3 pages (most Articles of Organization are 1-2 pages)
       for (let page = 1; page <= 3; page++) {
         try {
           const result = await convert(page, { responseType: "image" });
@@ -87,12 +102,11 @@ async function performOCR(filePath, mimetype) {
             console.log(`📸 Converted page ${page} to image:`, result.path);
           }
         } catch (pageError) {
-          console.log(`⚠️ Page ${page} conversion failed (may not exist):`, pageError.message);
-          break; // Stop if page doesn't exist
+          console.log(`⚠️ Page ${page} conversion failed:`, pageError.message);
+          break;
         }
       }
     } else if (mimetype.startsWith('image/')) {
-      // Direct image file
       imagePaths.push(filePath);
       console.log('📸 Processing image file directly');
     }
@@ -101,14 +115,12 @@ async function performOCR(filePath, mimetype) {
       throw new Error('No images to process for OCR');
     }
     
-    // Perform OCR on each image
     let allOCRText = '';
     
     for (const imagePath of imagePaths) {
       console.log('🔍 Running OCR on:', path.basename(imagePath));
       
       try {
-        // Preprocess image for better OCR
         const processedImagePath = imagePath + '_processed.png';
         await sharp(imagePath)
           .resize(null, 2000, { withoutEnlargement: true })
@@ -117,7 +129,6 @@ async function performOCR(filePath, mimetype) {
           .png()
           .toFile(processedImagePath);
         
-        // Run Tesseract OCR
         const { data: { text } } = await Tesseract.recognize(processedImagePath, 'eng', {
           logger: m => {
             if (m.status === 'recognizing text') {
@@ -130,11 +141,10 @@ async function performOCR(filePath, mimetype) {
         
         if (text && text.trim().length > 0) {
           allOCRText += text + '\n';
-          console.log(`✅ OCR extracted ${text.length} characters from ${path.basename(imagePath)}`);
+          console.log(`✅ OCR extracted ${text.length} characters`);
           console.log(`📄 Sample OCR text: "${text.substring(0, 100)}..."`);
         }
         
-        // Clean up processed image
         if (fs.existsSync(processedImagePath)) {
           fs.unlinkSync(processedImagePath);
         }
@@ -144,7 +154,7 @@ async function performOCR(filePath, mimetype) {
       }
     }
     
-    // Clean up temp images (but not the original file)
+    // Clean up temp images
     imagePaths.forEach(imagePath => {
       if (imagePath !== filePath && fs.existsSync(imagePath)) {
         fs.unlinkSync(imagePath);
@@ -152,28 +162,25 @@ async function performOCR(filePath, mimetype) {
     });
     
     if (allOCRText.trim().length === 0) {
-      throw new Error('OCR did not extract any readable text from the document');
+      throw new Error('OCR did not extract any readable text');
     }
     
-    // Clean up OCR text
     const cleanedText = allOCRText
       .replace(/\s+/g, ' ')
       .replace(/[^\w\s&\.\-',()]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     
-    console.log(`🎯 Final OCR result: ${cleanedText.length} characters extracted`);
-    console.log(`📄 OCR Preview: "${cleanedText.substring(0, 200)}..."`);
-    
+    console.log(`🎯 OCR result: ${cleanedText.length} characters extracted`);
     return cleanedText;
     
   } catch (error) {
     console.error('❌ OCR processing failed:', error);
-    throw new Error(`OCR processing failed: ${error.message}. This may be due to poor image quality, unsupported format, or missing OCR dependencies.`);
+    throw error;
   }
 }
 
-// Enhanced PDF parsing with OCR fallback for scanned documents
+// Enhanced PDF parsing with conditional OCR
 async function parsePdfWithFallbacks(filePath) {
   const pdfBuffer = fs.readFileSync(filePath);
   
@@ -221,7 +228,7 @@ async function parsePdfWithFallbacks(filePath) {
     
     fieldPatterns.forEach(pattern => {
       let match;
-      while ((match = pattern.regex.exec(bufferStr)) !== null) {
+      while ((match = pattern.exec(bufferStr)) !== null) {
         const text = match[1];
         if (text && text.length > 2 && /[A-Za-z]/.test(text)) {
           extractedTexts.push(text);
@@ -266,42 +273,61 @@ async function parsePdfWithFallbacks(filePath) {
     console.log('❌ Method 4 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 5: OCR (Optical Character Recognition)');
-  console.log('📸 This PDF appears to be a scanned image - using OCR to extract text...');
-  
-  try {
-    // Use OCR as the final fallback for scanned PDFs
-    const ocrText = await performOCR(filePath, 'application/pdf');
-    if (ocrText && ocrText.length > 20) {
-      console.log('✅ Method 5 (OCR) successful, extracted text length:', ocrText.length);
-      console.log('📄 OCR Sample text:', ocrText.substring(0, 150));
-      return ocrText;
+  // OCR method (only if available)
+  if (ocrAvailable) {
+    console.log('🔄 Attempting PDF parsing method 5: OCR (Optical Character Recognition)');
+    console.log('📸 This PDF appears to be a scanned image - using OCR...');
+    
+    try {
+      const ocrText = await performOCR(filePath, 'application/pdf');
+      if (ocrText && ocrText.length > 20) {
+        console.log('✅ Method 5 (OCR) successful, extracted text length:', ocrText.length);
+        return ocrText;
+      }
+      console.log('⚠️ Method 5 (OCR) produced insufficient text');
+    } catch (error) {
+      console.log('❌ Method 5 (OCR) failed:', error.message);
     }
-    console.log('⚠️ Method 5 (OCR) produced insufficient text');
-  } catch (error) {
-    console.log('❌ Method 5 (OCR) failed:', error.message);
+  } else {
+    console.log('⚠️ OCR not available - install dependencies for scanned PDF support');
   }
 
-  // If all methods fail, return a descriptive error
-  throw new Error(`Unable to extract text from PDF using any of 5 methods including OCR. 
+  // Enhanced error message
+  const errorMessage = ocrAvailable 
+    ? `Unable to extract text from PDF using any of 5 methods including OCR.`
+    : `Unable to extract text from PDF using standard methods. This appears to be a scanned PDF.`;
+    
+  const solutions = ocrAvailable 
+    ? [
+        'Try a higher quality scan (300+ DPI)',
+        'Use professional OCR software',
+        'Re-scan the original document',
+        'Convert to DOCX manually'
+      ]
+    : [
+        'Install OCR dependencies: npm install tesseract.js pdf2pic sharp',
+        'Convert to DOCX using Adobe Acrobat or Google Docs',
+        'Use online OCR services',
+        'Manual text entry',
+        'Contact support for OCR setup assistance'
+      ];
+
+  throw new Error(`${errorMessage}
     
     This could be due to:
-    1. Very poor image quality in the scanned PDF
-    2. Handwritten text that OCR cannot recognize
-    3. Unusual fonts or formatting
-    4. Corrupted or password-protected file
-    5. Missing OCR dependencies
+    1. Scanned image PDF (requires OCR)
+    2. Poor image quality
+    3. Handwritten text
+    4. Password protection
+    5. File corruption
     
     Solutions to try:
-    • Ensure the PDF has clear, readable text
-    • Try a higher quality scan (300+ DPI)
-    • Convert to a different format manually
-    • Use professional OCR software
-    • Re-scan the original document with better quality
-    • Contact support for assistance`);
+    ${solutions.map((sol, i) => `${i + 1}. ${sol}`).join('\n    ')}
+    
+    ${!ocrAvailable ? '\n🔍 OCR Status: Not installed. Install OCR dependencies to process scanned PDFs automatically.' : ''}`);
 }
 
-// Enhanced document parsing with OCR support
+// Enhanced document parsing
 async function parseDocument(filePath, mimetype) {
   try {
     let text = '';
@@ -322,6 +348,9 @@ async function parseDocument(filePath, mimetype) {
       case 'image/png':
       case 'image/jpeg':
       case 'image/jpg':
+        if (!ocrAvailable) {
+          throw new Error('Image processing requires OCR dependencies. Install with: npm install tesseract.js pdf2pic sharp');
+        }
         console.log('📸 Processing image file with OCR...');
         text = await performOCR(filePath, mimetype);
         break;
@@ -333,7 +362,7 @@ async function parseDocument(filePath, mimetype) {
     console.log(`📝 Final extracted text length: ${text.length} characters`);
     
     if (text.length < 10) {
-      throw new Error('Extracted text is too short. Document may be empty, corrupted, or require manual processing.');
+      throw new Error('Extracted text is too short. Document may be empty, corrupted, or require OCR processing.');
     }
     
     return text;
@@ -343,9 +372,9 @@ async function parseDocument(filePath, mimetype) {
   }
 }
 
-// ENHANCED: Company name extraction with OCR-specific improvements
+// Enhanced company name extraction
 function extractCompanyNamesEnhanced(text) {
-  console.log('🔍 ENHANCED: Extracting company names (v3.3.0 with OCR support)...');
+  console.log('🔍 ENHANCED: Extracting company names (v3.2.1)...');
   console.log('📄 Raw text length:', text.length);
   console.log('📄 First 500 chars:', text.substring(0, 500));
   
@@ -353,7 +382,6 @@ function extractCompanyNamesEnhanced(text) {
 
   const cleanText = text.replace(/\s+/g, ' ').replace(/\n+/g, ' ').trim();
   
-  // Test for specific company names
   console.log('🔍 Testing for BitConcepts:', cleanText.includes('BitConcepts'));
   console.log('🔍 Testing for PORVIN:', cleanText.includes('PORVIN'));
   console.log('🔍 Testing for LLC:', cleanText.includes('LLC'));
@@ -361,44 +389,44 @@ function extractCompanyNamesEnhanced(text) {
   
   const foundNames = [];
 
-  // OCR-friendly patterns (more flexible for OCR text recognition errors)
+  // Enhanced patterns with OCR tolerance
   const enhancedPatterns = [
-    // Exact match for Articles format with OCR tolerance
+    // Very specific Articles of Organization pattern
     {
-      name: 'Articles LLC Pattern (OCR tolerant)',
+      name: 'Articles LLC Declaration',
       regex: /(?:The\s+name\s+of\s+the\s+limited\s+liability\s+company\s+is|company\s+is)[:\s]*([A-Za-z][A-Za-z\s&\.\-',]*(?:LLC|PLLC|Inc\.?|Corp\.?))/gi,
-      confidence: 70
+      confidence: 75
     },
-    // More flexible Articles pattern for OCR
+    // Flexible Articles pattern for OCR errors
     {
       name: 'Flexible Articles Pattern',
-      regex: /(?:limited\s+liability\s+company|LLC\s+is|company\s+name)[:\s]*([A-Za-z][^.\n\r]{5,60}(?:LLC|PLLC))/gi,
-      confidence: 65
+      regex: /(?:limited\s+liability\s+company|LLC\s+company)[:\s]*([A-Za-z][^.\n\r]{5,60}(?:LLC|PLLC))/gi,
+      confidence: 70
     },
-    // Law firm pattern
+    // Law firm header pattern
     {
-      name: 'Header PLLC Pattern', 
+      name: 'Law Firm Header PLLC', 
       regex: /(PORVIN[^,]*,?\s*BURNSTEIN[^,]*&[^,]*GARELIK[^,]*,?\s*PLLC)/gi,
-      confidence: 60
+      confidence: 65
     },
     // BitConcepts specific with OCR tolerance
     {
-      name: 'BitConcepts Specific (OCR tolerant)',
+      name: 'BitConcepts Specific',
       regex: /([Bb][Ii][Tt][Cc][Oo][Nn][Cc][Ee][Pp][Tt][Ss][^,]*,?\s*LLC)/gi,
-      confidence: 65
+      confidence: 70
     },
-    // More flexible patterns for OCR errors
+    // More flexible patterns
     {
-      name: 'Flexible LLC Pattern',
+      name: 'Any Company LLC',
       regex: /([A-Z][A-Za-z\s&\.\-']{3,45})\s*,?\s*LLC/gi,
       confidence: 45
     },
     {
-      name: 'Flexible PLLC Pattern',
+      name: 'Any Company PLLC',
       regex: /([A-Z][A-Za-z\s&\.\-']{3,45})\s*,?\s*PLLC/gi,
       confidence: 50
     },
-    // Standard patterns
+    // Standard fallback patterns
     {
       name: 'Standard LLC',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(LLC|L\.L\.C\.)\b/g,
@@ -426,7 +454,6 @@ function extractCompanyNamesEnhanced(text) {
       
       let finalName = fullMatch.trim();
       
-      // Clean up the name (especially important for OCR text)
       if (companyPart && companyPart.trim()) {
         const cleanCompanyPart = companyPart.trim()
           .replace(/[^\w\s&\.\-',]/g, '')
@@ -434,7 +461,6 @@ function extractCompanyNamesEnhanced(text) {
           .trim();
           
         if (cleanCompanyPart.length > 1) {
-          // Determine entity type
           if (fullMatch.includes('PLLC')) {
             finalName = cleanCompanyPart.includes('PLLC') ? cleanCompanyPart : `${cleanCompanyPart} PLLC`;
           } else if (fullMatch.includes('LLC')) {
@@ -445,7 +471,6 @@ function extractCompanyNamesEnhanced(text) {
         }
       }
       
-      // Additional validation with OCR tolerance
       if (finalName.length >= 3 && finalName.length <= 80 && 
           !/^(article|certificate|department|the\s+name)/i.test(finalName)) {
         
@@ -464,7 +489,7 @@ function extractCompanyNamesEnhanced(text) {
     pattern.regex.lastIndex = 0;
   });
 
-  // Enhanced deduplication
+  // Deduplication
   const uniqueNames = foundNames.reduce((acc, current) => {
     const normalizedCurrentName = current.name.toLowerCase()
       .replace(/[^a-z0-9]/g, '')
@@ -496,10 +521,9 @@ function extractCompanyNamesEnhanced(text) {
   return uniqueNames.slice(0, 5);
 }
 
-// Standard extraction function (unchanged)
+// Standard extraction function
 function extractCompanyNames(text) {
   console.log('🔍 Extracting company names (standard method)...');
-  console.log('📄 Document preview:', text.substring(0, 800));
   
   if (!text || text.length < 5) return [];
 
@@ -510,38 +534,34 @@ function extractCompanyNames(text) {
     /certificate\s+of\s+formation\s+for/i,
     /bylaws?\s+of\s+the/i,
     /operating\s+agreement\s+of/i,
-    /memorandum\s+of\s+understanding\s+between/i,
-    /terms?\s+of\s+service\s+agreement/i,
-    /privacy\s+policy\s+of/i
   ];
 
   const patterns = [
     {
       name: 'Articles LLC Format',
       regex: /(?:name\s+of\s+the\s+limited\s+liability\s+company\s+is\s*:?\s*)([A-Za-z][A-Za-z\s&\.\-',]{2,50}(?:\s*,?\s*LLC))/gi,
-      confidence: 55
+      confidence: 60
     },
     {
       name: 'Standard LLC',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(LLC|L\.L\.C\.)\b/g,
-      confidence: 40
+      confidence: 45
     },
     {
       name: 'Professional LLC (PLLC)',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(PLLC|P\.L\.L\.C\.)\b/g,
-      confidence: 45
+      confidence: 50
     },
     {
       name: 'Standard Corporation',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(Inc\.?|Incorporated|Corporation|Corp\.?)\b/g,
-      confidence: 40
+      confidence: 45
     }
   ];
 
   const foundNames = [];
 
   patterns.forEach((pattern) => {
-    console.log(`🔍 Testing pattern: ${pattern.name}`);
     let match;
     let matchCount = 0;
     
@@ -550,45 +570,24 @@ function extractCompanyNames(text) {
       const fullMatch = match[0];
       const companyNamePart = match[1];
       
-      console.log(`✅ ${pattern.name} found: "${fullMatch}"`);
-      
       const isExcluded = excludePatterns.some(excludePattern => 
         excludePattern.test(fullMatch)
       );
       
-      if (isExcluded) {
-        console.log(`❌ Excluded: "${fullMatch}"`);
-        continue;
-      }
+      if (isExcluded) continue;
       
-      const cleanName = companyNamePart
-        .trim()
-        .replace(/\s+/g, ' ')
-        .replace(/[^\w\s&\.\-',]/g, '')
-        .trim();
+      const cleanName = companyNamePart.trim().replace(/\s+/g, ' ').replace(/[^\w\s&\.\-',]/g, '').trim();
       
-      if (cleanName.length >= 2 && 
-          cleanName.length <= 70 && 
-          /^[A-Z]/.test(cleanName) &&
-          !/^\d+$/.test(cleanName) &&
-          !/(^article|^certificate|^bylaw|^whereas|^therefore|department\s+of)/i.test(cleanName)) {
+      if (cleanName.length >= 2 && cleanName.length <= 70 && /^[A-Z]/.test(cleanName) &&
+          !/^\d+$/.test(cleanName) && !/(^article|^certificate)/i.test(cleanName)) {
         
-        let entityType = '';
-        if (/\b(LLC|L\.L\.C\.)\b/i.test(fullMatch)) {
-          entityType = 'LLC';
-        } else if (/\b(PLLC|P\.L\.L\.C\.)\b/i.test(fullMatch)) {
-          entityType = 'PLLC';
-        } else if (/\b(Inc\.?|Incorporated)\b/i.test(fullMatch)) {
-          entityType = 'Inc.';
-        } else if (/\b(Corp\.?|Corporation)\b/i.test(fullMatch)) {
-          entityType = 'Corp.';
-        } else {
-          entityType = 'LLC';
-        }
+        let entityType = 'LLC';
+        if (/\b(PLLC|P\.L\.L\.C\.)\b/i.test(fullMatch)) entityType = 'PLLC';
+        else if (/\b(Inc\.?|Incorporated)\b/i.test(fullMatch)) entityType = 'Inc.';
+        else if (/\b(Corp\.?|Corporation)\b/i.test(fullMatch)) entityType = 'Corp.';
         
         const finalName = entityType && !cleanName.toLowerCase().includes(entityType.toLowerCase()) 
-          ? `${cleanName} ${entityType}` 
-          : cleanName;
+          ? `${cleanName} ${entityType}` : cleanName;
         
         const confidence = calculateConfidence(fullMatch, cleanText, pattern.confidence, cleanName);
         
@@ -599,8 +598,6 @@ function extractCompanyNames(text) {
           originalMatch: fullMatch,
           context: getContext(cleanText, fullMatch)
         });
-        
-        console.log(`💾 Added: "${finalName}" (${confidence}% confidence)`);
       }
     }
     
@@ -608,14 +605,9 @@ function extractCompanyNames(text) {
   });
 
   const uniqueNames = foundNames.reduce((acc, current) => {
-    const normalizedCurrentName = current.name.toLowerCase()
-      .replace(/[^a-z0-9]/g, '')
-      .replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
-    
+    const normalizedCurrentName = current.name.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
     const existing = acc.find(item => {
-      const normalizedExistingName = item.name.toLowerCase()
-        .replace(/[^a-z0-9]/g, '')
-        .replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
+      const normalizedExistingName = item.name.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
       return normalizedExistingName === normalizedCurrentName;
     });
     
@@ -629,12 +621,6 @@ function extractCompanyNames(text) {
   }, []);
 
   uniqueNames.sort((a, b) => b.confidence - a.confidence);
-  
-  console.log(`🎯 Final results: ${uniqueNames.length} unique company names found`);
-  uniqueNames.forEach((name, index) => {
-    console.log(`${index + 1}. "${name.name}" (${name.confidence}% - ${name.patternName})`);
-  });
-  
   return uniqueNames.slice(0, 5);
 }
 
@@ -652,10 +638,6 @@ function calculateConfidence(match, fullText, baseConfidence, cleanName) {
   if (nameLength >= 5 && nameLength <= 30) confidence += 5;
   if (nameLength < 3) confidence -= 15;
   if (nameLength > 50) confidence -= 10;
-  
-  if (/(solutions|services|systems|technologies|consulting|industries|enterprises|group|partners)/i.test(cleanName)) {
-    confidence += 3;
-  }
   
   return Math.min(confidence, 100);
 }
@@ -695,79 +677,74 @@ async function updateHubSpotCompany(companyId, companyName) {
 
 // ROUTES
 
-// NEW: OCR-specific debug endpoint
-app.post('/api/debug-ocr', upload.single('document'), async (req, res) => {
-  try {
-    console.log('🔍 DEBUG: OCR-specific analysis');
-    
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    console.log('📄 DEBUG: Testing OCR on file:', req.file.originalname);
-    
-    const results = {
-      filename: req.file.originalname,
-      fileSize: req.file.size,
-      mimetype: req.file.mimetype,
-      ocrResults: null,
-      extractionResults: null,
-      processingTime: null
-    };
-
-    const startTime = Date.now();
-
+// OCR debug endpoint (only if dependencies available)
+if (ocrAvailable) {
+  app.post('/api/debug-ocr', upload.single('document'), async (req, res) => {
     try {
-      // Force OCR processing
-      console.log('🔍 Forcing OCR processing...');
-      const ocrText = await performOCR(req.file.path, req.file.mimetype);
-      results.ocrResults = {
+      console.log('🔍 DEBUG: OCR-specific analysis');
+      
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const results = {
+        filename: req.file.originalname,
+        fileSize: req.file.size,
+        mimetype: req.file.mimetype,
+        ocrResults: null,
+        extractionResults: null,
+        processingTime: null
+      };
+
+      const startTime = Date.now();
+
+      try {
+        const ocrText = await performOCR(req.file.path, req.file.mimetype);
+        results.ocrResults = {
+          success: true,
+          textLength: ocrText.length,
+          extractedText: ocrText,
+          preview: ocrText.substring(0, 500),
+          containsTargets: {
+            BitConcepts: ocrText.includes('BitConcepts'),
+            PORVIN: ocrText.includes('PORVIN'),
+            LLC: ocrText.includes('LLC'),
+            Articles: ocrText.toLowerCase().includes('articles')
+          }
+        };
+        
+        const companyNames = extractCompanyNamesEnhanced(ocrText);
+        results.extractionResults = companyNames;
+        
+      } catch (error) {
+        results.ocrResults = {
+          success: false,
+          error: error.message
+        };
+      }
+
+      results.processingTime = Date.now() - startTime;
+
+      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      
+      res.json({
         success: true,
-        textLength: ocrText.length,
-        extractedText: ocrText,
-        preview: ocrText.substring(0, 500),
-        containsTargets: {
-          BitConcepts: ocrText.includes('BitConcepts'),
-          PORVIN: ocrText.includes('PORVIN'),
-          LLC: ocrText.includes('LLC'),
-          Articles: ocrText.toLowerCase().includes('articles')
-        }
-      };
-      
-      // Try extraction on OCR results
-      const companyNames = extractCompanyNamesEnhanced(ocrText);
-      results.extractionResults = companyNames;
-      
+        results: results,
+        recommendation: results.extractionResults && results.extractionResults.length > 0 ? 
+          'OCR successfully extracted company names!' : 
+          'OCR extracted text but no company names found',
+        processingTimeMs: results.processingTime
+      });
+
     } catch (error) {
-      results.ocrResults = {
-        success: false,
-        error: error.message
-      };
+      console.error('❌ DEBUG: Error in OCR analysis:', error);
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      res.status(500).json({ error: error.message });
     }
+  });
+}
 
-    results.processingTime = Date.now() - startTime;
-
-    // Cleanup
-    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    
-    res.json({
-      success: true,
-      results: results,
-      recommendation: results.extractionResults && results.extractionResults.length > 0 ? 
-        'OCR successfully extracted company names!' : 
-        'OCR extracted text but no company names found - check extraction patterns',
-      ocrCapable: true,
-      processingTimeMs: results.processingTime
-    });
-
-  } catch (error) {
-    console.error('❌ DEBUG: Error in OCR analysis:', error);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Enhanced debug text endpoint with OCR support
+// Debug text endpoint
 app.post('/api/debug-text', upload.single('document'), async (req, res) => {
   try {
     console.log('🔍 DEBUG: Text extraction request');
@@ -791,16 +768,10 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
       rawText: documentText,
       textLength: documentText.length,
       firstChars: documentText.substring(0, 1000),
-      lastChars: documentText.substring(Math.max(0, documentText.length - 500)),
       containsBitConcepts: documentText.includes('BitConcepts'),
       containsPorvin: documentText.includes('PORVIN'),
       containsLLC: documentText.includes('LLC'),
       containsPLLC: documentText.includes('PLLC'),
-      preview: {
-        line1: documentText.split('\n')[0] || '',
-        line2: documentText.split('\n')[1] || '',
-        line3: documentText.split('\n')[2] || ''
-      },
       standardExtractionResults: standardResults,
       enhancedExtractionResults: enhancedResults,
       extractionComparison: {
@@ -808,27 +779,34 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
         enhancedCount: enhancedResults.length,
         recommendation: enhancedResults.length > standardResults.length ? 'Use Enhanced' : 'Use Standard'
       },
-      ocrCapable: true,
-      note: 'This server supports OCR for scanned PDFs and images'
+      ocrStatus: ocrAvailable ? 'Available' : 'Not installed',
+      note: ocrAvailable ? 'OCR support enabled' : 'Install OCR dependencies for scanned PDF support'
     });
 
   } catch (error) {
     console.error('❌ DEBUG: Error extracting text:', error);
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    
+    const isScannedPdfError = error.message.includes('scanned') || error.message.includes('OCR');
+    
     res.status(500).json({ 
       error: error.message,
-      details: 'Text extraction failed. If this is a scanned PDF, try the /api/debug-ocr endpoint.',
-      troubleshooting: [
-        'For scanned PDFs: Try /api/debug-ocr endpoint',
-        'Ensure document quality is good for OCR',
-        'Try converting to DOCX format if possible',
-        'Check if document is password protected'
+      troubleshooting: isScannedPdfError && !ocrAvailable ? [
+        'This appears to be a scanned PDF',
+        'Install OCR dependencies: npm install tesseract.js pdf2pic sharp',
+        'Convert to DOCX using Adobe Acrobat or Google Docs',
+        'Use online OCR services',
+        'Manual text entry'
+      ] : [
+        'Try converting to DOCX format',
+        'Check if document is password protected',
+        'Ensure file is not corrupted'
       ]
     });
   }
 });
 
-// Extract multiple options endpoint (with OCR support)
+// Extract multiple options endpoint
 app.post('/api/extract-names', upload.single('document'), async (req, res) => {
   try {
     console.log('📥 Extract names request received');
@@ -851,21 +829,28 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
     
     if (companyOptions.length === 0) {
       console.log('❌ No company names found in document');
+      
+      const isScannedError = documentText.length < 50;
+      
       return res.status(400).json({ 
-        error: 'Could not extract any company names from document. Please ensure the document contains company names with legal entity types (LLC, Inc., Corp., PLLC, etc.)',
+        error: 'Could not extract any company names from document.',
         extractedText: documentText.substring(0, 1000) + '...',
         suggestion: 'Try the debug endpoints to analyze text extraction:',
         debugEndpoints: {
           textAnalysis: `${req.protocol}://${req.get('host')}/api/debug-text`,
-          ocrAnalysis: `${req.protocol}://${req.get('host')}/api/debug-ocr`
+          ...(ocrAvailable && { ocrAnalysis: `${req.protocol}://${req.get('host')}/api/debug-ocr` })
         },
-        troubleshooting: [
-          'For scanned documents: OCR extraction was attempted',
-          'Check if document contains searchable text',
-          'Verify company names include entity types (LLC, Inc., etc.)',
-          'Try higher quality scans if using OCR',
-          'Ensure document is not password protected'
-        ]
+        troubleshooting: isScannedError && !ocrAvailable ? [
+          'This appears to be a scanned PDF requiring OCR',
+          'Install OCR dependencies: npm install tesseract.js pdf2pic sharp',
+          'Convert to DOCX using Adobe Acrobat',
+          'Use online OCR services'
+        ] : [
+          'Check if document contains company names with entity types (LLC, Inc., etc.)',
+          'Verify document is not password protected',
+          'Try converting to DOCX format'
+        ],
+        ocrStatus: ocrAvailable ? 'Available' : 'Not installed'
       });
     }
 
@@ -875,37 +860,40 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
       filename: req.file.originalname,
       documentLength: documentText.length,
       companyOptions: companyOptions,
-      extractionMethod: 'Enhanced multi-pattern content analysis v3.3.0 with OCR support for scanned documents',
-      ocrUsed: req.file.mimetype === 'application/pdf' ? 'Attempted if needed' : req.file.mimetype.startsWith('image/') ? 'Yes' : 'No'
+      extractionMethod: `Enhanced multi-pattern content analysis v3.2.1${ocrAvailable ? ' with OCR support' : ''}`,
+      ocrAvailable: ocrAvailable
     });
 
   } catch (error) {
     console.error('❌ Extract names error:', error);
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    
+    const isScannedError = error.message.includes('scanned') || error.message.includes('OCR');
+    
     res.status(500).json({ 
       error: error.message,
-      troubleshooting: [
-        'For scanned PDFs: Use /api/debug-ocr for detailed OCR analysis',
+      troubleshooting: isScannedError && !ocrAvailable ? [
+        'This appears to be a scanned PDF',
+        'Install OCR: npm install tesseract.js pdf2pic sharp',
+        'Convert to DOCX format',
+        'Use online OCR services'
+      ] : [
         'Try converting document to DOCX format',
-        'Ensure document quality is good for OCR',
         'Check if document is corrupted or password protected'
-      ]
+      ],
+      ocrStatus: ocrAvailable ? 'Available' : 'Not installed'
     });
   }
 });
 
-// Update company with selected name
+// Update company endpoint
 app.post('/api/update-company', async (req, res) => {
   try {
-    console.log('🔄 Update company request received');
-    
     const { companyId, companyName } = req.body;
     
     if (!companyId || !companyName) {
       return res.status(400).json({ error: 'Company ID and name are required' });
     }
-
-    console.log(`📝 Request: Update company ${companyId} with "${companyName}"`);
 
     const updatedCompany = await updateHubSpotCompany(companyId, companyName);
 
@@ -923,11 +911,9 @@ app.post('/api/update-company', async (req, res) => {
   }
 });
 
-// Legacy endpoint for backward compatibility
+// Legacy endpoint
 app.post('/api/upload-document', upload.single('document'), async (req, res) => {
   try {
-    console.log('⚠️ Legacy upload-document endpoint called - consider using new flow');
-    
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     const { companyId } = req.body;
@@ -944,8 +930,7 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
     if (companyOptions.length === 0) {
       return res.status(400).json({ 
         error: 'Could not extract company names',
-        extractedText: documentText.substring(0, 1000) + '...',
-        debugEndpoint: `${req.protocol}://${req.get('host')}/api/debug-text`
+        extractedText: documentText.substring(0, 1000) + '...'
       });
     }
 
@@ -957,8 +942,7 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
       extractedName: bestOption.name,
       companyId: companyId,
       filename: req.file.originalname,
-      allOptions: companyOptions,
-      note: 'Auto-selected best option. Use new selection interface for manual choice.'
+      allOptions: companyOptions
     });
 
   } catch (error) {
@@ -972,47 +956,37 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'BT Company Extractor API v3.3.0 with OCR Support for Scanned PDFs is running!',
-    version: '3.3.0',
+    message: `BT Company Extractor API v3.2.1${ocrAvailable ? ' with OCR Support' : ' (OCR Ready)'}`,
+    version: '3.2.1',
     timestamp: new Date().toISOString(),
     features: [
-      'OCR support for scanned PDFs and images (Tesseract.js)',
+      `${ocrAvailable ? 'OCR support enabled' : 'OCR ready (install dependencies)'}`,
       'Enhanced PDF text extraction with multiple fallback methods',
       'DOCX parsing', 
       'Multi-option company name detection',
-      'Articles of Organization support (including scanned)',
+      'Articles of Organization support',
       'PLLC entity recognition',
       'Enhanced extraction algorithms',
       'Comprehensive debug endpoints',
       'User selection interface',
-      'Edit capability',
       'HubSpot CRM integration'
     ],
     endpoints: [
-      'POST /api/extract-names - Extract multiple company name options (with OCR)',
-      'POST /api/update-company - Update HubSpot with selected name',
-      'POST /api/debug-text - Debug document text extraction',
-      'POST /api/debug-ocr - Test OCR processing specifically (NEW)',
-      'POST /api/upload-document - Legacy auto-update endpoint'
+      'POST /api/extract-names - Extract company names',
+      'POST /api/update-company - Update HubSpot',
+      'POST /api/debug-text - Debug text extraction',
+      ...(ocrAvailable ? ['POST /api/debug-ocr - Test OCR processing'] : []),
+      'POST /api/upload-document - Legacy endpoint'
     ],
-    improvements: [
-      'Added Tesseract.js OCR for scanned PDFs and images',
-      'Enhanced patterns for OCR text recognition',
-      'PDF to image conversion for OCR processing',
-      'Improved error handling for scanned documents',
-      'Better text cleaning for OCR results',
-      'Support for PNG, JPEG image uploads'
-    ],
-    dependencies: [
-      'tesseract.js - OCR text recognition',
-      'pdf2pic - PDF to image conversion', 
-      'sharp - Image processing'
-    ],
+    ocrStatus: {
+      available: ocrAvailable,
+      message: ocrAvailable ? 'OCR dependencies loaded successfully' : 'Install with: npm install tesseract.js pdf2pic sharp',
+      supportedFormats: ocrAvailable ? ['PDF (scanned)', 'PNG', 'JPEG'] : ['Not available']
+    },
     env: {
       hasHubSpotToken: !!process.env.HUBSPOT_ACCESS_TOKEN,
       nodeVersion: process.version,
-      platform: 'Render',
-      ocrEnabled: true
+      platform: 'Render'
     }
   });
 });
@@ -1020,34 +994,26 @@ app.get('/api/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'BT Company Name Extractor API v3.3.0',
-    status: 'OCR-Enabled for Scanned PDFs and Images',
-    description: 'Extract company names from documents including scanned PDFs using OCR technology',
+    message: 'BT Company Name Extractor API v3.2.1',
+    status: ocrAvailable ? 'OCR-Enabled' : 'OCR-Ready (Install Dependencies)',
+    description: 'Extract company names from documents with optional OCR support',
     features: [
       'Extract up to 5 company name options',
-      'OCR support for scanned PDFs (Tesseract.js)',
-      'Image file processing (PNG, JPEG)',
       'Enhanced PDF parsing with multiple fallback methods',
-      'Comprehensive debug endpoints',
-      'Articles of Organization support (including scanned)',
+      'Articles of Organization support',
       'PLLC entity recognition',
-      'Dual extraction algorithms',
-      'Confidence scoring and ranking',
       'User selection and editing interface',
-      'HubSpot CRM integration'
+      'HubSpot CRM integration',
+      ...(ocrAvailable ? ['OCR for scanned PDFs', 'Image processing'] : ['OCR ready (install dependencies)'])
     ],
-    ocrSupport: {
-      enabled: true,
-      supportedFormats: ['PDF (scanned)', 'PNG', 'JPEG', 'JPG'],
-      engine: 'Tesseract.js',
-      languages: ['English'],
-      recommendedDPI: '300+',
-      maxFileSize: '10MB'
-    },
-    debugUsage: {
-      textAnalysis: 'POST /api/debug-text with document',
-      ocrAnalysis: 'POST /api/debug-ocr with scanned PDF or image (NEW)',
-      description: 'Upload documents to analyze text extraction and company name detection'
+    ocrInstructions: ocrAvailable ? {
+      status: 'Enabled',
+      supportedFormats: ['PDF (scanned)', 'PNG', 'JPEG'],
+      engine: 'Tesseract.js'
+    } : {
+      status: 'Install required',
+      command: 'npm install tesseract.js pdf2pic sharp',
+      note: 'OCR will automatically enable after installing dependencies'
     }
   });
 });
@@ -1058,18 +1024,24 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log('🚀 BT Company Extractor v3.3.0 server started');
+  console.log('🚀 BT Company Extractor v3.2.1 server started');
   console.log(`📍 Running on port ${PORT}`);
   console.log(`🔑 HubSpot token configured: ${!!process.env.HUBSPOT_ACCESS_TOKEN}`);
-  console.log('✨ Features: OCR for scanned PDFs, image processing, enhanced extraction');
+  console.log(`🔍 OCR Status: ${ocrAvailable ? 'ENABLED' : 'Install dependencies to enable'}`);
   console.log('🌐 Available endpoints:');
   console.log('   GET  /api/health');
-  console.log('   POST /api/extract-names (with OCR support)');
-  console.log('   POST /api/update-company');
+  console.log('   POST /api/extract-names');
+  console.log('   POST /api/update-company'); 
   console.log('   POST /api/debug-text');
-  console.log('   POST /api/debug-ocr (NEW)');
+  if (ocrAvailable) {
+    console.log('   POST /api/debug-ocr');
+  }
   console.log('   POST /api/upload-document (legacy)');
-  console.log('🔍 OCR: Tesseract.js enabled for scanned documents');
-  console.log('📸 Supported: PDF, DOCX, DOC, PNG, JPEG, JPG');
-  console.log('💡 Tip: Use /api/debug-ocr to test OCR processing on scanned documents');
+  
+  if (!ocrAvailable) {
+    console.log('');
+    console.log('💡 To enable OCR for scanned PDFs:');
+    console.log('   npm install tesseract.js pdf2pic sharp');
+    console.log('   Then restart the server');
+  }
 });
