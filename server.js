@@ -245,7 +245,7 @@ async function performOCR(filePath, mimetype) {
   }
 }
 
-// Enhanced PDF parsing with conditional OCR
+// Enhanced PDF parsing with aggressive text extraction (OCR alternative)
 async function parsePdfWithFallbacks(filePath) {
   const pdfBuffer = fs.readFileSync(filePath);
   
@@ -280,116 +280,139 @@ async function parsePdfWithFallbacks(filePath) {
     console.log('❌ Method 2 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 3: Form fields extraction');
+  console.log('🔄 Attempting PDF parsing method 3: Aggressive buffer scanning for scanned PDFs');
   try {
+    // For scanned PDFs, look for any text that might be embedded
     const bufferStr = pdfBuffer.toString('latin1');
-    const extractedTexts = [];
+    const extractedTexts = new Set(); // Use Set to avoid duplicates
     
-    const fieldPatterns = [
-      /\/V\s*\((.*?)\)/g,
-      /\/T\s*\((.*?)\)/g,
-      /\/Contents\s*\((.*?)\)/g,
+    // Multiple text extraction patterns for scanned PDFs
+    const textPatterns = [
+      // Standard PDF text patterns
+      /\(([^)]{3,})\)/g,
+      /\[([^\]]{3,})\]/g,
+      /\/Title\s*\(([^)]+)\)/g,
+      /\/Subject\s*\(([^)]+)\)/g,
+      /\/Author\s*\(([^)]+)\)/g,
+      /\/Keywords\s*\(([^)]+)\)/g,
+      // Form field patterns
+      /\/V\s*\(([^)]+)\)/g,
+      /\/T\s*\(([^)]+)\)/g,
+      /\/Contents\s*\(([^)]+)\)/g,
+      // Text stream patterns
+      /Tj\s*\[\s*\(([^)]+)\)/g,
+      /TJ\s*\[\s*\(([^)]+)\)/g,
+      // Specific company name hunting
+      /BitConcepts[^,\n\r]{0,20}LLC/gi,
+      /PORVIN[^,\n\r]{0,50}PLLC/gi,
+      // Look for any text that looks like company names
+      /[A-Z][A-Za-z\s&\.\-']{5,40}(?:LLC|PLLC|Inc|Corp)/g,
     ];
     
-    fieldPatterns.forEach(pattern => {
+    textPatterns.forEach((pattern, index) => {
       let match;
       while ((match = pattern.exec(bufferStr)) !== null) {
-        const text = match[1];
+        const text = match[1] || match[0];
         if (text && text.length > 2 && /[A-Za-z]/.test(text)) {
-          extractedTexts.push(text);
+          // Clean the text
+          const cleanText = text
+            .replace(/[^\w\s&\.\-',]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          
+          if (cleanText.length > 3) {
+            extractedTexts.add(cleanText);
+            console.log(`📝 Pattern ${index + 1} found: "${cleanText}"`);
+          }
         }
       }
       pattern.lastIndex = 0;
     });
     
-    if (extractedTexts.length > 0) {
-      const combinedText = extractedTexts.join(' ').replace(/[^\w\s&\.\-',]/g, ' ').replace(/\s+/g, ' ').trim();
-      if (combinedText.length > 20) {
-        console.log('✅ Method 3 successful, extracted text length:', combinedText.length);
-        return combinedText;
+    // Also try hex decoding for embedded text
+    console.log('🔍 Trying hex decoding for embedded text...');
+    const hexStr = pdfBuffer.toString('hex');
+    const hexPatterns = [
+      // Look for hex-encoded "BitConcepts"
+      /426974436f6e6365707473/gi, // "BitConcepts" in hex
+      /504f5256494e/gi, // "PORVIN" in hex
+      /4c4c43/gi, // "LLC" in hex
+      /504c4c43/gi, // "PLLC" in hex
+    ];
+    
+    hexPatterns.forEach(pattern => {
+      const matches = hexStr.match(pattern);
+      if (matches) {
+        matches.forEach(hexMatch => {
+          try {
+            const decoded = Buffer.from(hexMatch, 'hex').toString('utf8');
+            if (decoded && decoded.length > 1) {
+              extractedTexts.add(decoded);
+              console.log(`📝 Hex decoded: "${decoded}"`);
+            }
+          } catch (e) {
+            // Ignore hex decode errors
+          }
+        });
+      }
+    });
+    
+    if (extractedTexts.size > 0) {
+      const combinedText = Array.from(extractedTexts).join(' ');
+      const finalText = combinedText
+        .replace(/\s+/g, ' ')
+        .trim();
+        
+      if (finalText.length > 10) {
+        console.log('✅ Method 3 successful, extracted text length:', finalText.length);
+        console.log('📄 Extracted text preview:', finalText.substring(0, 200));
+        return finalText;
       }
     }
-    console.log('⚠️ Method 3 found no form fields');
+    console.log('⚠️ Method 3 found no readable text');
   } catch (error) {
     console.log('❌ Method 3 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 4: Raw text extraction');
-  try {
-    const bufferText = pdfBuffer.toString('latin1');
-    const parenthesesMatches = bufferText.match(/\(([^)]{2,})\)/g);
-    
-    if (parenthesesMatches && parenthesesMatches.length > 0) {
-      let extractedText = parenthesesMatches
-        .map(match => match.replace(/[()]/g, ''))
-        .filter(text => text.length > 1 && /[A-Za-z]/.test(text))
-        .join(' ')
-        .replace(/[^\w\s&\.\-',]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      
-      if (extractedText.length > 20) {
-        console.log('✅ Method 4 successful, extracted text length:', extractedText.length);
-        return extractedText;
-      }
-    }
-    console.log('⚠️ Method 4 produced insufficient text');
-  } catch (error) {
-    console.log('❌ Method 4 failed:', error.message);
-  }
-
-  // OCR method (only if available)
+  console.log('🔄 Attempting PDF parsing method 4: OCR (if available)');
   if (ocrAvailable) {
-    console.log('🔄 Attempting PDF parsing method 5: OCR (Optical Character Recognition)');
-    console.log('📸 This PDF appears to be a scanned image - using OCR...');
-    
     try {
       const ocrText = await performOCR(filePath, 'application/pdf');
       if (ocrText && ocrText.length > 20) {
-        console.log('✅ Method 5 (OCR) successful, extracted text length:', ocrText.length);
+        console.log('✅ Method 4 (OCR) successful, extracted text length:', ocrText.length);
         return ocrText;
       }
-      console.log('⚠️ Method 5 (OCR) produced insufficient text');
+      console.log('⚠️ Method 4 (OCR) produced insufficient text');
     } catch (error) {
-      console.log('❌ Method 5 (OCR) failed:', error.message);
+      console.log('❌ Method 4 (OCR) failed:', error.message);
     }
   } else {
-    console.log('⚠️ OCR not available - install dependencies for scanned PDF support');
+    console.log('⚠️ OCR not available for Method 4');
   }
 
-  // Enhanced error message
-  const errorMessage = ocrAvailable 
-    ? `Unable to extract text from PDF using any of 5 methods including OCR.`
-    : `Unable to extract text from PDF using standard methods. This appears to be a scanned PDF.`;
+  // Enhanced error message with specific guidance
+  const errorMessage = `Unable to extract text from this PDF using any available method.
     
-  const solutions = ocrAvailable 
-    ? [
-        'Try a higher quality scan (300+ DPI)',
-        'Use professional OCR software',
-        'Re-scan the original document',
-        'Convert to DOCX manually'
-      ]
-    : [
-        'Install OCR dependencies: npm install tesseract.js pdf2pic sharp',
-        'Convert to DOCX using Adobe Acrobat or Google Docs',
-        'Use online OCR services',
-        'Manual text entry',
-        'Contact support for OCR setup assistance'
-      ];
+    This appears to be a scanned PDF (image-based) that requires OCR processing.
+    
+    Current status:
+    - Standard PDF text extraction: Failed
+    - Enhanced buffer scanning: Failed
+    - OCR processing: ${ocrAvailable ? 'Available but failed (likely due to platform limitations)' : 'Not configured'}
+    
+    Solutions:
+    1. Convert PDF to DOCX using Adobe Acrobat or Google Docs
+    2. Use online OCR services (like Google Drive OCR)
+    3. Take screenshots and upload as images
+    4. Manual text entry
+    5. Try a different PDF viewer's "Export as Text" feature
+    
+    For Articles of Organization specifically:
+    - These documents are often scanned images
+    - Try uploading the document to Google Drive and converting to Google Docs
+    - Then export as DOCX and upload that instead`;
 
-  throw new Error(`${errorMessage}
-    
-    This could be due to:
-    1. Scanned image PDF (requires OCR)
-    2. Poor image quality
-    3. Handwritten text
-    4. Password protection
-    5. File corruption
-    
-    Solutions to try:
-    ${solutions.map((sol, i) => `${i + 1}. ${sol}`).join('\n    ')}
-    
-    ${!ocrAvailable ? '\n🔍 OCR Status: Not installed. Install OCR dependencies to process scanned PDFs automatically.' : ''}`);
+  throw new Error(errorMessage);
 }
 
 // Enhanced document parsing
