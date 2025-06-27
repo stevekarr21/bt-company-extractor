@@ -1,4 +1,4 @@
-// server.js - Version 3.2.0 - Enhanced PDF Parsing with Multiple Fallback Methods
+// server.js - Version 3.3.0 - With OCR Support for Scanned PDFs
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -8,22 +8,32 @@ const path = require('path');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 
+// OCR Dependencies - Install these: npm install tesseract.js pdf2pic sharp
+const Tesseract = require('tesseract.js');
+const pdf2pic = require('pdf2pic');
+const sharp = require('sharp');
+
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting BT Company Extractor v3.2.0 with Enhanced PDF Parsing');
+console.log('🚀 Starting BT Company Extractor v3.3.0 with OCR Support for Scanned PDFs');
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Create uploads directory
+// Create uploads and temp directories
 const uploadsDir = path.join(__dirname, 'uploads');
+const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
   console.log('📁 Created uploads directory');
+}
+if (!fs.existsSync(tempDir)) {
+  fs.mkdirSync(tempDir, { recursive: true });
+  console.log('📁 Created temp directory for OCR processing');
 }
 
 // Configure multer
@@ -39,13 +49,131 @@ const upload = multer({
     const allowedTypes = [
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/msword'
+      'application/msword',
+      'image/png',
+      'image/jpeg',
+      'image/jpg'
     ];
     cb(null, allowedTypes.includes(file.mimetype));
   }
 });
 
-// Enhanced PDF parsing with multiple fallback methods
+// OCR processing function for scanned PDFs and images
+async function performOCR(filePath, mimetype) {
+  console.log('🔍 Starting OCR processing for:', path.basename(filePath));
+  
+  try {
+    let imagePaths = [];
+    
+    if (mimetype === 'application/pdf') {
+      console.log('📄 Converting PDF pages to images for OCR...');
+      
+      // Convert PDF to images
+      const convert = pdf2pic.fromPath(filePath, {
+        density: 300,           // DPI - higher = better quality
+        saveFilename: "page",
+        savePath: tempDir,
+        format: "png",
+        width: 2000,           // High resolution for better OCR
+        height: 2000
+      });
+      
+      // Convert first 3 pages (most Articles of Organization are 1-2 pages)
+      for (let page = 1; page <= 3; page++) {
+        try {
+          const result = await convert(page, { responseType: "image" });
+          if (result.path) {
+            imagePaths.push(result.path);
+            console.log(`📸 Converted page ${page} to image:`, result.path);
+          }
+        } catch (pageError) {
+          console.log(`⚠️ Page ${page} conversion failed (may not exist):`, pageError.message);
+          break; // Stop if page doesn't exist
+        }
+      }
+    } else if (mimetype.startsWith('image/')) {
+      // Direct image file
+      imagePaths.push(filePath);
+      console.log('📸 Processing image file directly');
+    }
+    
+    if (imagePaths.length === 0) {
+      throw new Error('No images to process for OCR');
+    }
+    
+    // Perform OCR on each image
+    let allOCRText = '';
+    
+    for (const imagePath of imagePaths) {
+      console.log('🔍 Running OCR on:', path.basename(imagePath));
+      
+      try {
+        // Preprocess image for better OCR
+        const processedImagePath = imagePath + '_processed.png';
+        await sharp(imagePath)
+          .resize(null, 2000, { withoutEnlargement: true })
+          .normalize()
+          .sharpen()
+          .png()
+          .toFile(processedImagePath);
+        
+        // Run Tesseract OCR
+        const { data: { text } } = await Tesseract.recognize(processedImagePath, 'eng', {
+          logger: m => {
+            if (m.status === 'recognizing text') {
+              console.log(`📝 OCR Progress: ${Math.round(m.progress * 100)}%`);
+            }
+          },
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,&-\'()',
+          tessedit_pageseg_mode: Tesseract.PSM.AUTO_OSD,
+        });
+        
+        if (text && text.trim().length > 0) {
+          allOCRText += text + '\n';
+          console.log(`✅ OCR extracted ${text.length} characters from ${path.basename(imagePath)}`);
+          console.log(`📄 Sample OCR text: "${text.substring(0, 100)}..."`);
+        }
+        
+        // Clean up processed image
+        if (fs.existsSync(processedImagePath)) {
+          fs.unlinkSync(processedImagePath);
+        }
+        
+      } catch (ocrError) {
+        console.error(`❌ OCR failed for ${imagePath}:`, ocrError.message);
+      }
+    }
+    
+    // Clean up temp images (but not the original file)
+    imagePaths.forEach(imagePath => {
+      if (imagePath !== filePath && fs.existsSync(imagePath)) {
+        fs.unlinkSync(imagePath);
+      }
+    });
+    
+    if (allOCRText.trim().length === 0) {
+      throw new Error('OCR did not extract any readable text from the document');
+    }
+    
+    // Clean up OCR text
+    const cleanedText = allOCRText
+      .replace(/\s+/g, ' ')
+      .replace(/[^\w\s&\.\-',()]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    console.log(`🎯 Final OCR result: ${cleanedText.length} characters extracted`);
+    console.log(`📄 OCR Preview: "${cleanedText.substring(0, 200)}..."`);
+    
+    return cleanedText;
+    
+  } catch (error) {
+    console.error('❌ OCR processing failed:', error);
+    throw new Error(`OCR processing failed: ${error.message}. This may be due to poor image quality, unsupported format, or missing OCR dependencies.`);
+  }
+}
+
+// Enhanced PDF parsing with OCR fallback for scanned documents
 async function parsePdfWithFallbacks(filePath) {
   const pdfBuffer = fs.readFileSync(filePath);
   
@@ -65,7 +193,7 @@ async function parsePdfWithFallbacks(filePath) {
   console.log('🔄 Attempting PDF parsing method 2: pdf-parse with enhanced options');
   try {
     const pdfData = await pdf(pdfBuffer, {
-      max: 0, // Parse all pages
+      max: 0,
       version: 'v1.10.100',
       normalizeWhitespace: true,
       disableCombineTextItems: false
@@ -80,13 +208,45 @@ async function parsePdfWithFallbacks(filePath) {
     console.log('❌ Method 2 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 3: Raw buffer text extraction');
+  console.log('🔄 Attempting PDF parsing method 3: Form fields extraction');
   try {
-    // Convert buffer to string and look for text patterns
-    const bufferText = pdfBuffer.toString('latin1');
+    const bufferStr = pdfBuffer.toString('latin1');
+    const extractedTexts = [];
     
-    // Look for text in parentheses (common PDF text encoding)
+    const fieldPatterns = [
+      /\/V\s*\((.*?)\)/g,
+      /\/T\s*\((.*?)\)/g,
+      /\/Contents\s*\((.*?)\)/g,
+    ];
+    
+    fieldPatterns.forEach(pattern => {
+      let match;
+      while ((match = pattern.regex.exec(bufferStr)) !== null) {
+        const text = match[1];
+        if (text && text.length > 2 && /[A-Za-z]/.test(text)) {
+          extractedTexts.push(text);
+        }
+      }
+      pattern.lastIndex = 0;
+    });
+    
+    if (extractedTexts.length > 0) {
+      const combinedText = extractedTexts.join(' ').replace(/[^\w\s&\.\-',]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (combinedText.length > 20) {
+        console.log('✅ Method 3 successful, extracted text length:', combinedText.length);
+        return combinedText;
+      }
+    }
+    console.log('⚠️ Method 3 found no form fields');
+  } catch (error) {
+    console.log('❌ Method 3 failed:', error.message);
+  }
+
+  console.log('🔄 Attempting PDF parsing method 4: Raw text extraction');
+  try {
+    const bufferText = pdfBuffer.toString('latin1');
     const parenthesesMatches = bufferText.match(/\(([^)]{2,})\)/g);
+    
     if (parenthesesMatches && parenthesesMatches.length > 0) {
       let extractedText = parenthesesMatches
         .map(match => match.replace(/[()]/g, ''))
@@ -97,132 +257,51 @@ async function parsePdfWithFallbacks(filePath) {
         .trim();
       
       if (extractedText.length > 20) {
-        console.log('✅ Method 3 successful, extracted text length:', extractedText.length);
-        console.log('📄 Sample text:', extractedText.substring(0, 150));
-        return extractedText;
-      }
-    }
-    
-    // Look for bracket-encoded text
-    const bracketMatches = bufferText.match(/\[([^\]]{2,})\]/g);
-    if (bracketMatches && bracketMatches.length > 0) {
-      let extractedText = bracketMatches
-        .map(match => match.replace(/[\[\]]/g, ''))
-        .filter(text => text.length > 1 && /[A-Za-z]/.test(text))
-        .join(' ')
-        .replace(/[^\w\s&\.\-',]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      
-      if (extractedText.length > 20) {
-        console.log('✅ Method 3 (brackets) successful, extracted text length:', extractedText.length);
-        console.log('📄 Sample text:', extractedText.substring(0, 150));
-        return extractedText;
-      }
-    }
-    
-    console.log('⚠️ Method 3 produced insufficient text');
-  } catch (error) {
-    console.log('❌ Method 3 failed:', error.message);
-  }
-
-  console.log('🔄 Attempting PDF parsing method 4: Stream-based extraction');
-  try {
-    const bufferStr = pdfBuffer.toString('binary');
-    const textObjects = [];
-    
-    // Look for PDF text streams
-    const streamRegex = /stream\s*(.*?)\s*endstream/gs;
-    let match;
-    while ((match = streamRegex.exec(bufferStr)) !== null) {
-      const streamContent = match[1];
-      
-      // Extract readable text from stream
-      const readableMatches = streamContent.match(/[A-Za-z][A-Za-z\s&\.\-',]{2,}/g);
-      if (readableMatches) {
-        textObjects.push(...readableMatches);
-      }
-    }
-    
-    if (textObjects.length > 0) {
-      const extractedText = textObjects
-        .filter(text => text.length > 2)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-        
-      if (extractedText.length > 20) {
         console.log('✅ Method 4 successful, extracted text length:', extractedText.length);
-        console.log('📄 Sample text:', extractedText.substring(0, 150));
         return extractedText;
       }
     }
-    console.log('⚠️ Method 4 produced no readable text');
+    console.log('⚠️ Method 4 produced insufficient text');
   } catch (error) {
     console.log('❌ Method 4 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 5: Hex-decoded text search');
+  console.log('🔄 Attempting PDF parsing method 5: OCR (Optical Character Recognition)');
+  console.log('📸 This PDF appears to be a scanned image - using OCR to extract text...');
+  
   try {
-    const bufferStr = pdfBuffer.toString('hex');
-    const textMatches = [];
-    
-    // Look for common text patterns in hex
-    for (let i = 0; i < bufferStr.length - 20; i += 2) {
-      const hexPair = bufferStr.substr(i, 2);
-      const charCode = parseInt(hexPair, 16);
-      
-      // Look for readable ASCII characters
-      if (charCode >= 32 && charCode <= 126) {
-        const char = String.fromCharCode(charCode);
-        if (textMatches.length === 0 || textMatches[textMatches.length - 1].length < 100) {
-          if (textMatches.length === 0) {
-            textMatches.push(char);
-          } else {
-            textMatches[textMatches.length - 1] += char;
-          }
-        }
-      } else if (textMatches.length > 0 && textMatches[textMatches.length - 1].length > 3) {
-        textMatches.push('');
-      }
+    // Use OCR as the final fallback for scanned PDFs
+    const ocrText = await performOCR(filePath, 'application/pdf');
+    if (ocrText && ocrText.length > 20) {
+      console.log('✅ Method 5 (OCR) successful, extracted text length:', ocrText.length);
+      console.log('📄 OCR Sample text:', ocrText.substring(0, 150));
+      return ocrText;
     }
-    
-    const readableText = textMatches
-      .filter(text => text.length > 5 && /[A-Za-z]/.test(text))
-      .join(' ')
-      .replace(/[^\w\s&\.\-',]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    if (readableText.length > 20) {
-      console.log('✅ Method 5 successful, extracted text length:', readableText.length);
-      console.log('📄 Sample text:', readableText.substring(0, 150));
-      return readableText;
-    }
-    console.log('⚠️ Method 5 produced insufficient text');
+    console.log('⚠️ Method 5 (OCR) produced insufficient text');
   } catch (error) {
-    console.log('❌ Method 5 failed:', error.message);
+    console.log('❌ Method 5 (OCR) failed:', error.message);
   }
 
   // If all methods fail, return a descriptive error
-  throw new Error(`Unable to extract text from PDF using any of 5 parsing methods. 
+  throw new Error(`Unable to extract text from PDF using any of 5 methods including OCR. 
     
-    The PDF might be:
-    1. A scanned image (requires OCR)
-    2. Password protected  
-    3. Corrupted or in an unsupported format
-    4. Using advanced encryption
-    5. Empty or contains only images
+    This could be due to:
+    1. Very poor image quality in the scanned PDF
+    2. Handwritten text that OCR cannot recognize
+    3. Unusual fonts or formatting
+    4. Corrupted or password-protected file
+    5. Missing OCR dependencies
     
     Solutions to try:
-    • Convert to DOCX format
-    • Use OCR software if it's a scanned document  
-    • Check if the PDF opens normally in other applications
-    • Try uploading a different document
-    • Contact support if the issue persists`);
+    • Ensure the PDF has clear, readable text
+    • Try a higher quality scan (300+ DPI)
+    • Convert to a different format manually
+    • Use professional OCR software
+    • Re-scan the original document with better quality
+    • Contact support for assistance`);
 }
 
-// Enhanced document parsing with improved PDF handling
+// Enhanced document parsing with OCR support
 async function parseDocument(filePath, mimetype) {
   try {
     let text = '';
@@ -240,6 +319,12 @@ async function parseDocument(filePath, mimetype) {
         const docBuffer = fs.readFileSync(filePath);
         text = docBuffer.toString('utf8').replace(/[^\x20-\x7E]/g, ' ');
         break;
+      case 'image/png':
+      case 'image/jpeg':
+      case 'image/jpg':
+        console.log('📸 Processing image file with OCR...');
+        text = await performOCR(filePath, mimetype);
+        break;
       default:
         throw new Error('Unsupported file type');
     }
@@ -248,7 +333,7 @@ async function parseDocument(filePath, mimetype) {
     console.log(`📝 Final extracted text length: ${text.length} characters`);
     
     if (text.length < 10) {
-      throw new Error('Extracted text is too short. Document may be empty, corrupted, or require OCR.');
+      throw new Error('Extracted text is too short. Document may be empty, corrupted, or require manual processing.');
     }
     
     return text;
@@ -258,9 +343,9 @@ async function parseDocument(filePath, mimetype) {
   }
 }
 
-// ENHANCED: More specific patterns for Articles of Organization documents
+// ENHANCED: Company name extraction with OCR-specific improvements
 function extractCompanyNamesEnhanced(text) {
-  console.log('🔍 ENHANCED: Extracting company names (v3.2.0)...');
+  console.log('🔍 ENHANCED: Extracting company names (v3.3.0 with OCR support)...');
   console.log('📄 Raw text length:', text.length);
   console.log('📄 First 500 chars:', text.substring(0, 500));
   
@@ -276,54 +361,53 @@ function extractCompanyNamesEnhanced(text) {
   
   const foundNames = [];
 
-  // SUPER SPECIFIC patterns for Articles of Organization
+  // OCR-friendly patterns (more flexible for OCR text recognition errors)
   const enhancedPatterns = [
-    // Exact match for Articles format - fixed regex to stop at line breaks
+    // Exact match for Articles format with OCR tolerance
     {
-      name: 'Exact Articles LLC Pattern',
-      regex: /The\s+name\s+of\s+the\s+limited\s+liability\s+company\s+is\s*:?\s*([A-Za-z][A-Za-z\s&\.\-',]*(?:LLC|PLLC|Inc\.?|Corp\.?))/gi,
+      name: 'Articles LLC Pattern (OCR tolerant)',
+      regex: /(?:The\s+name\s+of\s+the\s+limited\s+liability\s+company\s+is|company\s+is)[:\s]*([A-Za-z][A-Za-z\s&\.\-',]*(?:LLC|PLLC|Inc\.?|Corp\.?))/gi,
+      confidence: 70
+    },
+    // More flexible Articles pattern for OCR
+    {
+      name: 'Flexible Articles Pattern',
+      regex: /(?:limited\s+liability\s+company|LLC\s+is|company\s+name)[:\s]*([A-Za-z][^.\n\r]{5,60}(?:LLC|PLLC))/gi,
       confidence: 65
     },
-    // More specific Articles pattern
-    {
-      name: 'Articles Line Pattern',
-      regex: /limited\s+liability\s+company\s+is\s*:?\s*([A-Za-z][^.\n\r]{5,60}(?:LLC|PLLC))/gi,
-      confidence: 60
-    },
-    // Exact match for the header law firm
+    // Law firm pattern
     {
       name: 'Header PLLC Pattern', 
-      regex: /(PORVIN[^,]*,\s*BURNSTEIN[^,]*&[^,]*GARELIK[^,]*,?\s*PLLC)/gi,
-      confidence: 55
-    },
-    // Broader BitConcepts pattern
-    {
-      name: 'BitConcepts Specific',
-      regex: /(BitConcepts[^,]*,?\s*LLC)/gi,
+      regex: /(PORVIN[^,]*,?\s*BURNSTEIN[^,]*&[^,]*GARELIK[^,]*,?\s*PLLC)/gi,
       confidence: 60
     },
-    // Any text followed by PLLC
+    // BitConcepts specific with OCR tolerance
     {
-      name: 'Any PLLC Pattern',
-      regex: /([A-Z][^,\n\r]{5,50})\s*,?\s*PLLC/g,
+      name: 'BitConcepts Specific (OCR tolerant)',
+      regex: /([Bb][Ii][Tt][Cc][Oo][Nn][Cc][Ee][Pp][Tt][Ss][^,]*,?\s*LLC)/gi,
+      confidence: 65
+    },
+    // More flexible patterns for OCR errors
+    {
+      name: 'Flexible LLC Pattern',
+      regex: /([A-Z][A-Za-z\s&\.\-']{3,45})\s*,?\s*LLC/gi,
       confidence: 45
     },
-    // Any text followed by LLC in formal context
     {
-      name: 'Formal LLC Pattern',
-      regex: /([A-Z][A-Za-z\s&\.\-']{2,40})\s*,?\s*LLC/g,
-      confidence: 40
+      name: 'Flexible PLLC Pattern',
+      regex: /([A-Z][A-Za-z\s&\.\-']{3,45})\s*,?\s*PLLC/gi,
+      confidence: 50
     },
-    // Standard patterns as fallback
+    // Standard patterns
     {
       name: 'Standard LLC',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(LLC|L\.L\.C\.)\b/g,
-      confidence: 35
+      confidence: 40
     },
     {
       name: 'Professional LLC (PLLC)',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(PLLC|P\.L\.L\.C\.)\b/g,
-      confidence: 40
+      confidence: 45
     }
   ];
 
@@ -342,7 +426,7 @@ function extractCompanyNamesEnhanced(text) {
       
       let finalName = fullMatch.trim();
       
-      // Clean up the name
+      // Clean up the name (especially important for OCR text)
       if (companyPart && companyPart.trim()) {
         const cleanCompanyPart = companyPart.trim()
           .replace(/[^\w\s&\.\-',]/g, '')
@@ -356,14 +440,14 @@ function extractCompanyNamesEnhanced(text) {
           } else if (fullMatch.includes('LLC')) {
             finalName = cleanCompanyPart.includes('LLC') ? cleanCompanyPart : `${cleanCompanyPart} LLC`;
           } else {
-            finalName = cleanCompanyPart + ' LLC'; // Default for Articles
+            finalName = cleanCompanyPart + ' LLC';
           }
         }
       }
       
-      // Additional validation
+      // Additional validation with OCR tolerance
       if (finalName.length >= 3 && finalName.length <= 80 && 
-          !/^(article|certificate|department)/i.test(finalName)) {
+          !/^(article|certificate|department|the\s+name)/i.test(finalName)) {
         
         foundNames.push({
           name: finalName,
@@ -412,7 +496,7 @@ function extractCompanyNamesEnhanced(text) {
   return uniqueNames.slice(0, 5);
 }
 
-// Original extraction function for backward compatibility
+// Standard extraction function (unchanged)
 function extractCompanyNames(text) {
   console.log('🔍 Extracting company names (standard method)...');
   console.log('📄 Document preview:', text.substring(0, 800));
@@ -421,7 +505,6 @@ function extractCompanyNames(text) {
 
   const cleanText = text.replace(/\s+/g, ' ').replace(/\n+/g, ' ').trim();
 
-  // Fixed exclusion patterns
   const excludePatterns = [
     /articles?\s+of\s+incorporation\s+for/i,
     /certificate\s+of\s+formation\s+for/i,
@@ -432,7 +515,6 @@ function extractCompanyNames(text) {
     /privacy\s+policy\s+of/i
   ];
 
-  // Standard patterns
   const patterns = [
     {
       name: 'Articles LLC Format',
@@ -470,7 +552,6 @@ function extractCompanyNames(text) {
       
       console.log(`✅ ${pattern.name} found: "${fullMatch}"`);
       
-      // Check exclusions
       const isExcluded = excludePatterns.some(excludePattern => 
         excludePattern.test(fullMatch)
       );
@@ -526,7 +607,6 @@ function extractCompanyNames(text) {
     pattern.regex.lastIndex = 0;
   });
 
-  // Remove duplicates and sort
   const uniqueNames = foundNames.reduce((acc, current) => {
     const normalizedCurrentName = current.name.toLowerCase()
       .replace(/[^a-z0-9]/g, '')
@@ -561,22 +641,18 @@ function extractCompanyNames(text) {
 function calculateConfidence(match, fullText, baseConfidence, cleanName) {
   let confidence = baseConfidence;
   
-  // Boost for multiple occurrences
   const occurrences = (fullText.match(new RegExp(cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')) || []).length;
   confidence += Math.min(occurrences * 3, 15);
   
-  // Boost if appears early in document
   const position = fullText.toLowerCase().indexOf(match.toLowerCase());
   if (position < 200) confidence += 10;
   else if (position < 500) confidence += 5;
   
-  // Boost for reasonable name length
   const nameLength = cleanName.length;
   if (nameLength >= 5 && nameLength <= 30) confidence += 5;
   if (nameLength < 3) confidence -= 15;
   if (nameLength > 50) confidence -= 10;
   
-  // Boost for common business words
   if (/(solutions|services|systems|technologies|consulting|industries|enterprises|group|partners)/i.test(cleanName)) {
     confidence += 3;
   }
@@ -619,141 +695,79 @@ async function updateHubSpotCompany(companyId, companyName) {
 
 // ROUTES
 
-// NEW: Comprehensive PDF parsing debug endpoint
-app.post('/api/debug-pdf-parsing', upload.single('document'), async (req, res) => {
+// NEW: OCR-specific debug endpoint
+app.post('/api/debug-ocr', upload.single('document'), async (req, res) => {
   try {
-    console.log('🔍 DEBUG: Comprehensive PDF parsing analysis');
+    console.log('🔍 DEBUG: OCR-specific analysis');
     
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    if (req.file.mimetype !== 'application/pdf') {
-      return res.status(400).json({ error: 'This endpoint is only for PDF files' });
-    }
-
-    console.log('📄 DEBUG: Analyzing PDF file:', req.file.originalname);
+    console.log('📄 DEBUG: Testing OCR on file:', req.file.originalname);
     
-    const debugResults = {
+    const results = {
       filename: req.file.originalname,
       fileSize: req.file.size,
       mimetype: req.file.mimetype,
-      parsingAttempts: [],
-      finalText: null,
-      extractionResults: null
+      ocrResults: null,
+      extractionResults: null,
+      processingTime: null
     };
 
-    // Try each parsing method and record results
-    const pdfBuffer = fs.readFileSync(req.file.path);
-    
-    // Method 1: Standard pdf-parse
-    try {
-      const pdfData = await pdf(pdfBuffer);
-      debugResults.parsingAttempts.push({
-        method: 'pdf-parse default',
-        success: true,
-        textLength: pdfData.text.length,
-        preview: pdfData.text.substring(0, 300),
-        pageCount: pdfData.numpages,
-        containsTargetText: {
-          BitConcepts: pdfData.text.includes('BitConcepts'),
-          PORVIN: pdfData.text.includes('PORVIN'),
-          LLC: pdfData.text.includes('LLC'),
-          Articles: pdfData.text.toLowerCase().includes('articles')
-        }
-      });
-      if (!debugResults.finalText && pdfData.text.length > 50) {
-        debugResults.finalText = pdfData.text;
-      }
-    } catch (error) {
-      debugResults.parsingAttempts.push({
-        method: 'pdf-parse default',
-        success: false,
-        error: error.message
-      });
-    }
+    const startTime = Date.now();
 
-    // Method 2: pdf-parse with options
     try {
-      const pdfData = await pdf(pdfBuffer, {
-        max: 0,
-        version: 'v1.10.100',
-        normalizeWhitespace: true,
-        disableCombineTextItems: false
-      });
-      debugResults.parsingAttempts.push({
-        method: 'pdf-parse with options',
+      // Force OCR processing
+      console.log('🔍 Forcing OCR processing...');
+      const ocrText = await performOCR(req.file.path, req.file.mimetype);
+      results.ocrResults = {
         success: true,
-        textLength: pdfData.text.length,
-        preview: pdfData.text.substring(0, 300),
-        pageCount: pdfData.numpages,
-        containsTargetText: {
-          BitConcepts: pdfData.text.includes('BitConcepts'),
-          PORVIN: pdfData.text.includes('PORVIN'),
-          LLC: pdfData.text.includes('LLC'),
-          Articles: pdfData.text.toLowerCase().includes('articles')
-        }
-      });
-      if (!debugResults.finalText && pdfData.text.length > 50) {
-        debugResults.finalText = pdfData.text;
-      }
-    } catch (error) {
-      debugResults.parsingAttempts.push({
-        method: 'pdf-parse with options',
-        success: false,
-        error: error.message
-      });
-    }
-
-    // If we got text, try extraction
-    if (debugResults.finalText) {
-      console.log('🔍 Running extraction on parsed text...');
-      const standardResults = extractCompanyNames(debugResults.finalText);
-      const enhancedResults = extractCompanyNamesEnhanced(debugResults.finalText);
-      
-      debugResults.extractionResults = {
-        standardResults,
-        enhancedResults,
-        textAnalysis: {
-          length: debugResults.finalText.length,
-          containsBitConcepts: debugResults.finalText.includes('BitConcepts'),
-          containsPorvin: debugResults.finalText.includes('PORVIN'),
-          containsLLC: debugResults.finalText.includes('LLC'),
-          containsPLLC: debugResults.finalText.includes('PLLC'),
-          containsArticles: debugResults.finalText.toLowerCase().includes('articles of organization'),
-          firstWords: debugResults.finalText.substring(0, 100),
-          hasCompanyPatterns: /\b[A-Z][A-Za-z\s&\.\-']{2,50}\s*(LLC|PLLC|Inc|Corp)\b/.test(debugResults.finalText)
+        textLength: ocrText.length,
+        extractedText: ocrText,
+        preview: ocrText.substring(0, 500),
+        containsTargets: {
+          BitConcepts: ocrText.includes('BitConcepts'),
+          PORVIN: ocrText.includes('PORVIN'),
+          LLC: ocrText.includes('LLC'),
+          Articles: ocrText.toLowerCase().includes('articles')
         }
       };
+      
+      // Try extraction on OCR results
+      const companyNames = extractCompanyNamesEnhanced(ocrText);
+      results.extractionResults = companyNames;
+      
+    } catch (error) {
+      results.ocrResults = {
+        success: false,
+        error: error.message
+      };
     }
+
+    results.processingTime = Date.now() - startTime;
 
     // Cleanup
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     
     res.json({
       success: true,
-      debug: debugResults,
-      recommendation: debugResults.finalText ? 
-        (debugResults.extractionResults.enhancedResults.length > 0 ? 
-          'PDF parsing and extraction successful!' : 
-          'PDF parsed but no company names extracted - check patterns') : 
-        'PDF parsing failed - may need OCR or format conversion',
-      summary: {
-        pdfParsed: !!debugResults.finalText,
-        textLength: debugResults.finalText ? debugResults.finalText.length : 0,
-        companiesFound: debugResults.extractionResults ? debugResults.extractionResults.enhancedResults.length : 0,
-        successfulMethods: debugResults.parsingAttempts.filter(attempt => attempt.success).length
-      }
+      results: results,
+      recommendation: results.extractionResults && results.extractionResults.length > 0 ? 
+        'OCR successfully extracted company names!' : 
+        'OCR extracted text but no company names found - check extraction patterns',
+      ocrCapable: true,
+      processingTimeMs: results.processingTime
     });
 
   } catch (error) {
-    console.error('❌ DEBUG: Error in PDF analysis:', error);
+    console.error('❌ DEBUG: Error in OCR analysis:', error);
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Enhanced debug text endpoint
+// Enhanced debug text endpoint with OCR support
 app.post('/api/debug-text', upload.single('document'), async (req, res) => {
   try {
     console.log('🔍 DEBUG: Text extraction request');
@@ -766,14 +780,11 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
 
     const documentText = await parseDocument(req.file.path, req.file.mimetype);
     
-    // Run both extraction methods for comparison
     const standardResults = extractCompanyNames(documentText);
     const enhancedResults = extractCompanyNamesEnhanced(documentText);
     
-    // Cleanup file
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     
-    // Return comprehensive debug info
     res.json({
       success: true,
       filename: req.file.originalname,
@@ -796,7 +807,9 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
         standardCount: standardResults.length,
         enhancedCount: enhancedResults.length,
         recommendation: enhancedResults.length > standardResults.length ? 'Use Enhanced' : 'Use Standard'
-      }
+      },
+      ocrCapable: true,
+      note: 'This server supports OCR for scanned PDFs and images'
     });
 
   } catch (error) {
@@ -804,18 +817,18 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.status(500).json({ 
       error: error.message,
-      details: 'Text extraction failed. This could be due to PDF parsing issues, OCR requirements, or file corruption.',
+      details: 'Text extraction failed. If this is a scanned PDF, try the /api/debug-ocr endpoint.',
       troubleshooting: [
-        'Try the /api/debug-pdf-parsing endpoint for detailed PDF analysis',
-        'Convert the document to DOCX format if possible',
-        'Ensure the document is not password protected',
-        'Check if the document contains searchable text (not just images)'
+        'For scanned PDFs: Try /api/debug-ocr endpoint',
+        'Ensure document quality is good for OCR',
+        'Try converting to DOCX format if possible',
+        'Check if document is password protected'
       ]
     });
   }
 });
 
-// Extract multiple options endpoint (using enhanced method)
+// Extract multiple options endpoint (with OCR support)
 app.post('/api/extract-names', upload.single('document'), async (req, res) => {
   try {
     console.log('📥 Extract names request received');
@@ -828,14 +841,12 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
 
     const documentText = await parseDocument(req.file.path, req.file.mimetype);
     
-    // Try enhanced extraction first, fallback to standard
     let companyOptions = extractCompanyNamesEnhanced(documentText);
     if (companyOptions.length === 0) {
       console.log('⚠️ Enhanced extraction found nothing, trying standard method...');
       companyOptions = extractCompanyNames(documentText);
     }
     
-    // Cleanup
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     
     if (companyOptions.length === 0) {
@@ -846,12 +857,13 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
         suggestion: 'Try the debug endpoints to analyze text extraction:',
         debugEndpoints: {
           textAnalysis: `${req.protocol}://${req.get('host')}/api/debug-text`,
-          pdfAnalysis: `${req.protocol}://${req.get('host')}/api/debug-pdf-parsing`
+          ocrAnalysis: `${req.protocol}://${req.get('host')}/api/debug-ocr`
         },
         troubleshooting: [
-          'Check if document contains searchable text (not scanned images)',
+          'For scanned documents: OCR extraction was attempted',
+          'Check if document contains searchable text',
           'Verify company names include entity types (LLC, Inc., etc.)',
-          'Try converting to DOCX format',
+          'Try higher quality scans if using OCR',
           'Ensure document is not password protected'
         ]
       });
@@ -863,7 +875,8 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
       filename: req.file.originalname,
       documentLength: documentText.length,
       companyOptions: companyOptions,
-      extractionMethod: 'Enhanced multi-pattern content analysis v3.2.0 with improved PDF parsing'
+      extractionMethod: 'Enhanced multi-pattern content analysis v3.3.0 with OCR support for scanned documents',
+      ocrUsed: req.file.mimetype === 'application/pdf' ? 'Attempted if needed' : req.file.mimetype.startsWith('image/') ? 'Yes' : 'No'
     });
 
   } catch (error) {
@@ -872,10 +885,10 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
     res.status(500).json({ 
       error: error.message,
       troubleshooting: [
-        'Use /api/debug-pdf-parsing for detailed PDF analysis',
+        'For scanned PDFs: Use /api/debug-ocr for detailed OCR analysis',
         'Try converting document to DOCX format',
-        'Ensure document is not corrupted or password protected',
-        'Check if document requires OCR (scanned images)'
+        'Ensure document quality is good for OCR',
+        'Check if document is corrupted or password protected'
       ]
     });
   }
@@ -936,7 +949,6 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
       });
     }
 
-    // Auto-select best option for legacy support
     const bestOption = companyOptions[0];
     await updateHubSpotCompany(companyId, bestOption.name);
 
@@ -960,14 +972,15 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'BT Company Extractor API v3.2.0 with Enhanced PDF Parsing is running!',
-    version: '3.2.0',
+    message: 'BT Company Extractor API v3.3.0 with OCR Support for Scanned PDFs is running!',
+    version: '3.3.0',
     timestamp: new Date().toISOString(),
     features: [
-      'Enhanced PDF text extraction with 5 fallback methods',
+      'OCR support for scanned PDFs and images (Tesseract.js)',
+      'Enhanced PDF text extraction with multiple fallback methods',
       'DOCX parsing', 
       'Multi-option company name detection',
-      'Articles of Organization support',
+      'Articles of Organization support (including scanned)',
       'PLLC entity recognition',
       'Enhanced extraction algorithms',
       'Comprehensive debug endpoints',
@@ -976,24 +989,30 @@ app.get('/api/health', (req, res) => {
       'HubSpot CRM integration'
     ],
     endpoints: [
-      'POST /api/extract-names - Extract multiple company name options',
+      'POST /api/extract-names - Extract multiple company name options (with OCR)',
       'POST /api/update-company - Update HubSpot with selected name',
       'POST /api/debug-text - Debug document text extraction',
-      'POST /api/debug-pdf-parsing - Comprehensive PDF parsing analysis (NEW)',
+      'POST /api/debug-ocr - Test OCR processing specifically (NEW)',
       'POST /api/upload-document - Legacy auto-update endpoint'
     ],
     improvements: [
-      'Added 5 different PDF parsing methods with fallbacks',
-      'Enhanced error messages with troubleshooting steps',
-      'Comprehensive PDF parsing debug endpoint',
-      'Better handling of complex PDF structures',
-      'Improved extraction patterns for Articles of Organization',
-      'Enhanced text validation and cleaning'
+      'Added Tesseract.js OCR for scanned PDFs and images',
+      'Enhanced patterns for OCR text recognition',
+      'PDF to image conversion for OCR processing',
+      'Improved error handling for scanned documents',
+      'Better text cleaning for OCR results',
+      'Support for PNG, JPEG image uploads'
+    ],
+    dependencies: [
+      'tesseract.js - OCR text recognition',
+      'pdf2pic - PDF to image conversion', 
+      'sharp - Image processing'
     ],
     env: {
       hasHubSpotToken: !!process.env.HUBSPOT_ACCESS_TOKEN,
       nodeVersion: process.version,
-      platform: 'Render'
+      platform: 'Render',
+      ocrEnabled: true
     }
   });
 });
@@ -1001,23 +1020,33 @@ app.get('/api/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'BT Company Name Extractor API v3.2.0',
-    status: 'Enhanced PDF Parsing with Multiple Fallback Methods',
-    description: 'Extract company names from documents with comprehensive PDF parsing and debugging',
+    message: 'BT Company Name Extractor API v3.3.0',
+    status: 'OCR-Enabled for Scanned PDFs and Images',
+    description: 'Extract company names from documents including scanned PDFs using OCR technology',
     features: [
       'Extract up to 5 company name options',
-      'Enhanced PDF parsing with 5 fallback methods',
+      'OCR support for scanned PDFs (Tesseract.js)',
+      'Image file processing (PNG, JPEG)',
+      'Enhanced PDF parsing with multiple fallback methods',
       'Comprehensive debug endpoints',
-      'Articles of Organization support',
+      'Articles of Organization support (including scanned)',
       'PLLC entity recognition',
       'Dual extraction algorithms',
       'Confidence scoring and ranking',
       'User selection and editing interface',
       'HubSpot CRM integration'
     ],
+    ocrSupport: {
+      enabled: true,
+      supportedFormats: ['PDF (scanned)', 'PNG', 'JPEG', 'JPG'],
+      engine: 'Tesseract.js',
+      languages: ['English'],
+      recommendedDPI: '300+',
+      maxFileSize: '10MB'
+    },
     debugUsage: {
       textAnalysis: 'POST /api/debug-text with document',
-      pdfAnalysis: 'POST /api/debug-pdf-parsing with PDF (NEW)',
+      ocrAnalysis: 'POST /api/debug-ocr with scanned PDF or image (NEW)',
       description: 'Upload documents to analyze text extraction and company name detection'
     }
   });
@@ -1029,17 +1058,18 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log('🚀 BT Company Extractor v3.2.0 server started');
+  console.log('🚀 BT Company Extractor v3.3.0 server started');
   console.log(`📍 Running on port ${PORT}`);
   console.log(`🔑 HubSpot token configured: ${!!process.env.HUBSPOT_ACCESS_TOKEN}`);
-  console.log('✨ Features: Enhanced PDF parsing (5 methods), comprehensive debugging, PLLC support');
+  console.log('✨ Features: OCR for scanned PDFs, image processing, enhanced extraction');
   console.log('🌐 Available endpoints:');
   console.log('   GET  /api/health');
-  console.log('   POST /api/extract-names');
+  console.log('   POST /api/extract-names (with OCR support)');
   console.log('   POST /api/update-company');
   console.log('   POST /api/debug-text');
-  console.log('   POST /api/debug-pdf-parsing (NEW)');
+  console.log('   POST /api/debug-ocr (NEW)');
   console.log('   POST /api/upload-document (legacy)');
-  console.log('🔧 Debug: Use debug endpoints to troubleshoot PDF text extraction issues');
-  console.log('📈 Improvements: 5 PDF parsing fallback methods, better error handling, enhanced patterns');
+  console.log('🔍 OCR: Tesseract.js enabled for scanned documents');
+  console.log('📸 Supported: PDF, DOCX, DOC, PNG, JPEG, JPG');
+  console.log('💡 Tip: Use /api/debug-ocr to test OCR processing on scanned documents');
 });
