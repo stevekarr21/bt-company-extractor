@@ -1,4 +1,4 @@
-// server.js - Version 3.3.0 - Complete External OCR Integration
+// server.js - Version 3.4.0 - Optimized OCR Integration
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting BT Company Extractor v3.3.0 with Complete External OCR Integration');
+console.log('🚀 Starting BT Company Extractor v3.4.0 with Optimized OCR Integration');
 
 // Check for external OCR dependencies
 let FormData, fetch;
@@ -87,97 +87,296 @@ const upload = multer({
   }
 });
 
-// External OCR using OCR.space API (FIXED file handling)
-async function performExternalOCR(filePath, mimetype) {
+// Enhanced text quality analysis
+function analyzeTextQuality(text) {
+  if (!text || text.length === 0) {
+    return { readableRatio: 0, validWordCount: 0, garbledRatio: 1 };
+  }
+  
+  // Count different types of characters
+  const totalChars = text.length;
+  const readableChars = (text.match(/[a-zA-Z0-9\s\.,;:!?\-()&]/g) || []).length;
+  const letters = (text.match(/[a-zA-Z]/g) || []).length;
+  const garbledChars = (text.match(/[^\w\s\.,;:!?\-()&]/g) || []).length;
+  
+  // Extract potential words
+  const words = text.match(/[a-zA-Z]{2,}/g) || [];
+  
+  // Count valid English-like words (simple heuristic)
+  const validWords = words.filter(word => {
+    // Filter out obvious OCR garbage
+    if (word.length < 2) return false;
+    if (word.length > 20) return false; // Very long words are usually OCR errors
+    
+    // Check for reasonable vowel/consonant distribution
+    const vowels = (word.match(/[aeiouAEIOU]/g) || []).length;
+    const consonants = word.length - vowels;
+    
+    // Reject words with no vowels (unless very short) or too many consonants in a row
+    if (vowels === 0 && word.length > 3) return false;
+    if (/[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{5,}/.test(word)) return false;
+    
+    return true;
+  });
+  
+  return {
+    readableRatio: Math.round((readableChars / totalChars) * 100),
+    validWordCount: validWords.length,
+    garbledRatio: garbledChars / totalChars,
+    totalWords: words.length,
+    avgWordLength: words.length > 0 ? words.reduce((sum, w) => sum + w.length, 0) / words.length : 0
+  };
+}
+
+// Intelligent text cleanup based on common OCR errors
+function applyIntelligentCleanup(text, qualityAnalysis) {
+  let cleaned = text;
+  
+  // If quality is very poor, try more aggressive cleanup
+  if (qualityAnalysis.readableRatio < 50) {
+    console.log('🧹 Applying aggressive text cleanup...');
+    
+    // Remove obvious garbage patterns
+    cleaned = cleaned.replace(/[^\w\s\.,;:!?\-()&\'\"]/g, ' ');
+  }
+  
+  // Standard cleanup
+  cleaned = cleaned
+    .replace(/\s+/g, ' ')                    // Normalize whitespace
+    .replace(/([.!?])\s*([a-z])/g, '$1 $2')  // Fix missing spaces after punctuation
+    .replace(/([a-z])([A-Z])/g, '$1 $2')     // Add spaces between camelCase
+    .trim();
+  
+  return cleaned;
+}
+
+// Enhanced company indicator detection
+function checkForCompanyIndicators(text) {
+  const indicators = [
+    /\b(LLC|PLLC|Inc\.?|Corp\.?|Corporation|Company|Limited|LTD)\b/gi,
+    /\b(Articles?\s+of\s+(Incorporation|Organization))\b/gi,
+    /\b(Certificate\s+of\s+(Formation|Incorporation))\b/gi,
+    /\b(Entity\s+(Name|Type))\b/gi,
+    /\b(Business\s+(Name|Entity))\b/gi,
+    /\b(Company\s+Name)\b/gi,
+    /\b(Legal\s+Name)\b/gi,
+    /BitConcepts/gi,
+    /PORVIN/gi
+  ];
+  
+  const foundIndicators = indicators.filter(pattern => pattern.test(text));
+  return foundIndicators.length;
+}
+
+// Optimized OCR.space processing with multiple strategies
+async function performExternalOCROptimized(filePath, mimetype) {
   if (!externalOcrAvailable) {
     throw new Error('External OCR dependencies not available. Install: npm install form-data node-fetch');
   }
   
-  console.log('🌐 Starting external OCR processing for:', path.basename(filePath));
+  console.log('🌐 Starting OPTIMIZED OCR.space processing for:', path.basename(filePath));
   
   try {
-    // Use OCR.space API (free tier available)
-    const ocrApiKey = process.env.OCR_SPACE_API_KEY || 'helloworld'; // Free test key
-    
-    console.log('📡 Using OCR.space API for text extraction...');
-    
-    // Read file into buffer first (fixes stream issue)
+    const ocrApiKey = process.env.OCR_SPACE_API_KEY || 'helloworld';
     const fileBuffer = fs.readFileSync(filePath);
-    console.log(`📄 File read into buffer: ${fileBuffer.length} bytes`);
     
-    const formData = new FormData();
-    formData.append('file', fileBuffer, {
-      filename: path.basename(filePath),
-      contentType: mimetype
-    });
-    formData.append('apikey', ocrApiKey);
-    formData.append('language', 'eng');
-    formData.append('isOverlayRequired', 'false');
-    formData.append('detectOrientation', 'true');
-    formData.append('scale', 'true');
-    formData.append('isTable', 'false');
-    formData.append('OCREngine', '2'); // OCR Engine 2 for better accuracy
+    console.log(`📄 File size: ${(fileBuffer.length / 1024).toFixed(1)} KB`);
     
-    console.log('📡 Sending request to OCR.space API...');
+    // Multiple OCR strategies specifically optimized for difficult documents
+    const ocrStrategies = [
+      {
+        name: 'High-Resolution Engine 2 (Best for Articles)',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',           // Engine 2 is generally better for documents
+          'scale': 'true',            // Auto-scale for better resolution
+          'isTable': 'false',         // Not a table layout
+          'detectOrientation': 'true', // Auto-rotate if needed
+          'language': 'eng',
+          'isOverlayRequired': 'false',
+          'filetype': 'Auto',         // Let OCR.space detect file type
+          'isCreateSearchablePdf': 'false',
+          'isSearchablePdfHideTextLayer': 'false'
+        }
+      },
+      {
+        name: 'Engine 1 High Quality (Alternative)',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '1',           // Try engine 1 as backup
+          'scale': 'true',
+          'isTable': 'false',
+          'detectOrientation': 'true',
+          'language': 'eng',
+          'isOverlayRequired': 'false',
+          'filetype': 'Auto'
+        }
+      },
+      {
+        name: 'Table Detection Mode (For Complex Layouts)',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',
+          'scale': 'true',
+          'isTable': 'true',          // Enable table detection for complex layouts
+          'detectOrientation': 'true',
+          'language': 'eng',
+          'isOverlayRequired': 'false',
+          'filetype': 'Auto'
+        }
+      },
+      {
+        name: 'No Auto-Scaling (Raw Processing)',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',
+          'scale': 'false',           // Don't scale - use original resolution
+          'isTable': 'false',
+          'detectOrientation': 'false', // Don't auto-rotate
+          'language': 'eng',
+          'isOverlayRequired': 'false',
+          'filetype': 'Auto'
+        }
+      }
+    ];
     
-    const response = await fetch('https://api.ocr.space/parse/image', {
-      method: 'POST',
-      body: formData,
-      headers: formData.getHeaders()
-    });
-    
-    console.log(`📡 OCR API response status: ${response.status}`);
-    
-    if (!response.ok) {
-      throw new Error(`OCR API request failed: ${response.status} ${response.statusText}`);
+    for (const strategy of ocrStrategies) {
+      console.log(`📡 Trying strategy: ${strategy.name}`);
+      
+      try {
+        const formData = new FormData();
+        
+        // Add the file
+        formData.append('file', fileBuffer, {
+          filename: path.basename(filePath),
+          contentType: mimetype
+        });
+        
+        // Add all settings
+        Object.entries(strategy.settings).forEach(([key, value]) => {
+          formData.append(key, value);
+        });
+        
+        const response = await fetch('https://api.ocr.space/parse/image', {
+          method: 'POST',
+          body: formData,
+          headers: formData.getHeaders(),
+          timeout: 45000 // Longer timeout for better processing
+        });
+        
+        console.log(`📡 ${strategy.name} - Response status: ${response.status}`);
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.log(`❌ ${strategy.name} - HTTP Error: ${response.status} - ${errorText}`);
+          continue;
+        }
+        
+        const result = await response.json();
+        
+        // Detailed result analysis
+        console.log(`📊 ${strategy.name} - Result analysis:`, {
+          IsErroredOnProcessing: result.IsErroredOnProcessing,
+          ErrorMessage: result.ErrorMessage,
+          ErrorDetails: result.ErrorDetails,
+          ProcessingTimeInMilliseconds: result.ProcessingTimeInMilliseconds,
+          ParsedResults: result.ParsedResults?.length || 0
+        });
+        
+        if (result.IsErroredOnProcessing) {
+          console.log(`❌ ${strategy.name} - Processing error: ${result.ErrorMessage}`);
+          if (result.ErrorDetails) {
+            console.log(`🔍 Error details: ${JSON.stringify(result.ErrorDetails)}`);
+          }
+          continue;
+        }
+        
+        if (!result.ParsedResults || result.ParsedResults.length === 0) {
+          console.log(`❌ ${strategy.name} - No parsed results`);
+          continue;
+        }
+        
+        // Extract and analyze text from all pages
+        let allText = '';
+        let pageAnalysis = [];
+        
+        result.ParsedResults.forEach((page, index) => {
+          const pageText = page.ParsedText || '';
+          allText += pageText + '\n\n';
+          
+          const pageQuality = analyzeTextQuality(pageText);
+          pageAnalysis.push({
+            pageNumber: index + 1,
+            textLength: pageText.length,
+            quality: pageQuality,
+            hasValidWords: pageQuality.validWordCount > 3,
+            errorCorrectionCanHelp: pageQuality.garbledRatio < 0.7
+          });
+          
+          console.log(`📄 Page ${index + 1}: ${pageText.length} chars, ${pageQuality.readableRatio}% readable, ${pageQuality.validWordCount} valid words`);
+        });
+        
+        const overallQuality = analyzeTextQuality(allText);
+        
+        console.log(`📊 ${strategy.name} - Overall quality analysis:`, {
+          totalLength: allText.length,
+          readableRatio: `${overallQuality.readableRatio}%`,
+          validWords: overallQuality.validWordCount,
+          garbledRatio: `${(overallQuality.garbledRatio * 100).toFixed(1)}%`,
+          hasCompanyIndicators: checkForCompanyIndicators(allText)
+        });
+        
+        // Quality thresholds for accepting results
+        if (overallQuality.readableRatio < 20) {
+          console.log(`❌ ${strategy.name} - Text quality too poor (${overallQuality.readableRatio}%)`);
+          continue;
+        }
+        
+        if (allText.length < 20) {
+          console.log(`❌ ${strategy.name} - Text too short (${allText.length} chars)`);
+          continue;
+        }
+        
+        if (overallQuality.validWordCount < 5) {
+          console.log(`❌ ${strategy.name} - Too few valid words (${overallQuality.validWordCount})`);
+          continue;
+        }
+        
+        // Apply intelligent text cleanup
+        const cleanedText = applyIntelligentCleanup(allText, overallQuality);
+        const finalQuality = analyzeTextQuality(cleanedText);
+        
+        console.log(`✅ ${strategy.name} SUCCESS!`);
+        console.log(`📄 Original: ${allText.length} chars, Cleaned: ${cleanedText.length} chars`);
+        console.log(`📊 Quality improvement: ${overallQuality.readableRatio}% → ${finalQuality.readableRatio}%`);
+        console.log(`📝 Sample: "${cleanedText.substring(0, 200)}..."`);
+        
+        // Check for company name indicators
+        const companyIndicators = checkForCompanyIndicators(cleanedText);
+        console.log(`🏢 Company indicators found: ${companyIndicators}`);
+        
+        return {
+          text: cleanedText,
+          rawText: allText,
+          method: strategy.name,
+          quality: finalQuality.readableRatio,
+          validWords: finalQuality.validWordCount,
+          hasCompanyIndicators: companyIndicators,
+          pageAnalysis: pageAnalysis,
+          processingTime: result.ProcessingTimeInMilliseconds
+        };
+        
+      } catch (strategyError) {
+        console.error(`❌ ${strategy.name} failed:`, strategyError.message);
+        continue;
+      }
     }
     
-    const result = await response.json();
-    console.log('📡 OCR.space API response received');
-    console.log('📊 OCR Response structure:', {
-      IsErroredOnProcessing: result.IsErroredOnProcessing,
-      ParsedResultsCount: result.ParsedResults?.length || 0,
-      ErrorMessage: result.ErrorMessage
-    });
-    
-    if (result.IsErroredOnProcessing) {
-      throw new Error(`OCR processing error: ${result.ErrorMessage || 'Unknown error'}`);
-    }
-    
-    if (!result.ParsedResults || result.ParsedResults.length === 0) {
-      throw new Error('No text found in document by OCR.space');
-    }
-    
-    const extractedText = result.ParsedResults
-      .map(page => page.ParsedText || '')
-      .join('\n\n')
-      .trim();
-    
-    if (extractedText.length < 10) {
-      throw new Error('OCR extracted text too short - document may be empty or corrupted');
-    }
-    
-    console.log(`✅ OCR.space successful: extracted ${extractedText.length} characters`);
-    console.log(`📄 Sample text: "${extractedText.substring(0, 200)}..."`);
-    
-    // Check for target companies
-    console.log(`🔍 OCR Results - BitConcepts: ${extractedText.includes('BitConcepts')}`);
-    console.log(`🔍 OCR Results - PORVIN: ${extractedText.includes('PORVIN')}`);
-    console.log(`🔍 OCR Results - LLC: ${extractedText.includes('LLC')}`);
-    console.log(`🔍 OCR Results - Articles: ${extractedText.toLowerCase().includes('articles')}`);
-    
-    return extractedText;
+    throw new Error('All OCR.space strategies failed to produce acceptable text quality');
     
   } catch (error) {
-    console.error('❌ OCR.space failed:', error.message);
-    
-    // Fallback to Google Cloud Vision if available
-    if (process.env.GOOGLE_CLOUD_VISION_API_KEY) {
-      console.log('🔄 Trying Google Cloud Vision as fallback...');
-      return await performGoogleVisionOCR(filePath);
-    }
-    
-    throw new Error(`External OCR failed: ${error.message}. Consider setting up OCR.space API key or Google Cloud Vision API key.`);
+    console.error('❌ Optimized OCR.space processing failed:', error.message);
+    throw error;
   }
 }
 
@@ -432,19 +631,19 @@ async function parsePdfWithFallbacks(filePath) {
     console.log('❌ Method 3 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 4: External OCR Services');
-  console.log('📸 This PDF appears to be a scanned image - using external OCR...');
+  console.log('🔄 Attempting PDF parsing method 4: Optimized External OCR');
+  console.log('📸 This PDF appears to be a scanned image - using optimized OCR...');
   
   if (externalOcrAvailable) {
     try {
-      const ocrText = await performExternalOCR(filePath, 'application/pdf');
-      if (ocrText && ocrText.length > 20) {
-        console.log('✅ Method 4 (External OCR) successful, extracted text length:', ocrText.length);
-        return ocrText;
+      const ocrResult = await performExternalOCROptimized(filePath, 'application/pdf');
+      if (ocrResult && ocrResult.text && ocrResult.text.length > 20) {
+        console.log(`✅ Method 4 (Optimized OCR) successful: ${ocrResult.method}, extracted text length: ${ocrResult.text.length}`);
+        return ocrResult.text;
       }
-      console.log('⚠️ Method 4 (External OCR) produced insufficient text');
+      console.log('⚠️ Method 4 (Optimized OCR) produced insufficient text');
     } catch (error) {
-      console.log('❌ Method 4 (External OCR) failed:', error.message);
+      console.log('❌ Method 4 (Optimized OCR) failed:', error.message);
     }
   } else {
     console.log('⚠️ External OCR not available - missing dependencies');
@@ -490,66 +689,85 @@ async function parsePdfWithFallbacks(filePath) {
   throw new Error(errorMessage);
 }
 
-// Enhanced document parsing
-async function parseDocument(filePath, mimetype) {
+// Enhanced document parsing with optimized OCR
+async function parseDocumentWithOptimizedOCR(filePath, mimetype) {
   try {
     let text = '';
-    console.log('📄 Parsing document:', path.basename(filePath), 'Type:', mimetype);
+    console.log('📄 Parsing with optimized OCR:', path.basename(filePath), 'Type:', mimetype);
 
     switch (mimetype) {
       case 'application/pdf':
-        text = await parsePdfWithFallbacks(filePath);
+        // Try standard PDF parsing first
+        try {
+          text = await parsePdfWithFallbacks(filePath);
+          const quality = analyzeTextQuality(text);
+          
+          if (quality.readableRatio > 70 && quality.validWordCount > 10) {
+            console.log(`✅ Standard PDF parsing successful (${quality.readableRatio}% quality, ${quality.validWordCount} valid words)`);
+            return text;
+          } else {
+            console.log(`⚠️ Standard PDF parsing poor quality (${quality.readableRatio}%, ${quality.validWordCount} words) - trying OCR`);
+            throw new Error('Poor quality text - trying OCR');
+          }
+        } catch (pdfError) {
+          console.log('📸 PDF parsing failed, using optimized OCR...');
+          
+          if (externalOcrAvailable) {
+            const ocrResult = await performExternalOCROptimized(filePath, mimetype);
+            text = ocrResult.text;
+            
+            console.log(`✅ Optimized OCR completed: ${ocrResult.method} (${ocrResult.quality}% quality)`);
+            return text;
+          } else {
+            throw new Error('PDF requires OCR but OCR services not available');
+          }
+        }
         break;
-      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        const docxResult = await mammoth.extractRawText({ path: filePath });
-        text = docxResult.value;
-        break;
-      case 'application/msword':
-        const docBuffer = fs.readFileSync(filePath);
-        text = docBuffer.toString('utf8').replace(/[^\x20-\x7E]/g, ' ');
-        break;
+        
       case 'image/png':
       case 'image/jpeg':
       case 'image/jpg':
-        console.log('📸 Processing image file with OCR...');
+        console.log('📸 Processing image with optimized OCR...');
+        
         if (externalOcrAvailable) {
-          try {
-            text = await performExternalOCR(filePath, mimetype);
-          } catch (externalError) {
-            console.log('⚠️ External OCR failed, trying local OCR...');
-            if (localOcrAvailable) {
-              text = await performLocalOCR(filePath, mimetype);
-            } else {
-              throw new Error('Image processing requires OCR. External OCR failed and local OCR not available.');
-            }
-          }
-        } else if (localOcrAvailable) {
-          text = await performLocalOCR(filePath, mimetype);
+          const ocrResult = await performExternalOCROptimized(filePath, mimetype);
+          text = ocrResult.text;
         } else {
-          throw new Error('Image processing requires OCR dependencies. Install: npm install form-data node-fetch');
+          throw new Error('Image processing requires OCR services');
         }
         break;
+        
       default:
-        throw new Error('Unsupported file type');
+        // Handle DOCX and other text documents normally
+        if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const docxResult = await mammoth.extractRawText({ path: filePath });
+          text = docxResult.value;
+        } else if (mimetype === 'application/msword') {
+          const docBuffer = fs.readFileSync(filePath);
+          text = docBuffer.toString('utf8').replace(/[^\x20-\x7E]/g, ' ');
+        } else {
+          throw new Error('Unsupported file type');
+        }
     }
 
-    text = text.replace(/\s+/g, ' ').trim();
-    console.log(`📝 Final extracted text length: ${text.length} characters`);
+    const finalQuality = analyzeTextQuality(text);
+    console.log(`📝 Final text: ${text.length} characters (${finalQuality.readableRatio}% quality, ${finalQuality.validWordCount} valid words)`);
     
-    if (text.length < 10) {
-      throw new Error('Extracted text is too short. Document may be empty, corrupted, or require manual processing.');
+    if (text.length < 10 || finalQuality.readableRatio < 15) {
+      throw new Error(`Text quality too poor (${finalQuality.readableRatio}%) or too short (${text.length} chars). Document may need higher quality scan or different format.`);
     }
     
     return text;
+    
   } catch (error) {
-    console.error('❌ Error parsing document:', error);
+    console.error('❌ Enhanced document parsing error:', error);
     throw error;
   }
 }
 
 // Ultra-aggressive company name extraction for corrupted/OCR text
 function extractCompanyNamesEnhanced(text) {
-  console.log('🔍 ENHANCED: Extracting company names (v3.3.0 - Ultra-aggressive)...');
+  console.log('🔍 ENHANCED: Extracting company names (v3.4.0 - Ultra-aggressive)...');
   console.log('📄 Raw text length:', text.length);
   console.log('📄 First 500 chars:', text.substring(0, 500));
   
@@ -870,7 +1088,307 @@ async function updateHubSpotCompany(companyId, companyName) {
   return await response.json();
 }
 
+// Generate OCR recommendations
+function generateOCRRecommendations(results) {
+  const recommendations = [];
+  
+  const successfulStrategies = results.strategies.filter(s => s.success);
+  const avgQuality = successfulStrategies.length > 0 
+    ? successfulStrategies.reduce((sum, s) => sum + s.quality, 0) / successfulStrategies.length 
+    : 0;
+
+  if (successfulStrategies.length === 0) {
+    recommendations.push({
+      priority: 'HIGH',
+      issue: 'No OCR strategy worked',
+      solutions: [
+        'Document quality is too poor for OCR',
+        'Try scanning at 300+ DPI resolution',
+        'Ensure high contrast (black text on white background)',
+        'Check if document is skewed or rotated',
+        'Try converting to high-quality PNG/JPEG first',
+        'Consider manual transcription for critical documents'
+      ]
+    });
+  } else if (avgQuality < 30) {
+    recommendations.push({
+      priority: 'HIGH',
+      issue: `Poor text quality (${avgQuality.toFixed(1)}% average)`,
+      solutions: [
+        'Rescan document at higher resolution (600+ DPI)',
+        'Improve lighting and contrast when scanning',
+        'Ensure document is completely flat',
+        'Try different scanning software with auto-enhancement',
+        'Clean the document before scanning'
+      ]
+    });
+  } else if (avgQuality < 60) {
+    recommendations.push({
+      priority: 'MEDIUM',
+      issue: `Moderate text quality (${avgQuality.toFixed(1)}% average)`,
+      solutions: [
+        'Try higher resolution scanning for better results',
+        'Use document enhancement features in scanner software',
+        'Consider using the best strategy found: ' + (results.bestResult?.name || 'Unknown')
+      ]
+    });
+  } else {
+    recommendations.push({
+      priority: 'LOW',
+      issue: 'Good text quality achieved',
+      solutions: [
+        `Best strategy: ${results.bestResult?.name || 'Unknown'}`,
+        'Continue using this configuration for similar documents'
+      ]
+    });
+  }
+
+  // Check for specific patterns in failures
+  const hasHttpErrors = results.strategies.some(s => s.error && s.error.includes('HTTP'));
+  if (hasHttpErrors) {
+    recommendations.push({
+      priority: 'MEDIUM',
+      issue: 'API connection issues detected',
+      solutions: [
+        'Check OCR.space API key validity',
+        'Verify internet connection stability',
+        'Try reducing file size if very large',
+        'Check OCR.space service status'
+      ]
+    });
+  }
+
+  return recommendations;
+}
+
 // ROUTES
+
+// Detailed OCR debug endpoint
+app.post('/api/debug-detailed-ocr', upload.single('document'), async (req, res) => {
+  try {
+    console.log('🔬 DETAILED OCR DEBUG: Starting comprehensive analysis');
+    
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const startTime = Date.now();
+    const results = {
+      filename: req.file.originalname,
+      fileSize: `${(req.file.size / 1024).toFixed(1)} KB`,
+      mimetype: req.file.mimetype,
+      timestamp: new Date().toISOString(),
+      strategies: [],
+      bestResult: null,
+      recommendations: []
+    };
+
+    console.log(`🔬 Analyzing: ${req.file.originalname} (${results.fileSize})`);
+
+    if (!externalOcrAvailable) {
+      return res.status(400).json({
+        error: 'OCR dependencies not available',
+        install: 'npm install form-data node-fetch'
+      });
+    }
+
+    const ocrApiKey = process.env.OCR_SPACE_API_KEY || 'helloworld';
+    const fileBuffer = fs.readFileSync(req.file.path);
+
+    // Test multiple OCR.space configurations
+    const testConfigurations = [
+      {
+        name: 'Default Engine 2',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',
+          'scale': 'true',
+          'isTable': 'false',
+          'detectOrientation': 'true',
+          'language': 'eng'
+        }
+      },
+      {
+        name: 'Engine 1 Alternative',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '1',
+          'scale': 'true',
+          'isTable': 'false',
+          'detectOrientation': 'true',
+          'language': 'eng'
+        }
+      },
+      {
+        name: 'High-Quality No Scaling',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',
+          'scale': 'false',
+          'isTable': 'false',
+          'detectOrientation': 'false',
+          'language': 'eng'
+        }
+      },
+      {
+        name: 'Table Detection Mode',
+        settings: {
+          'apikey': ocrApiKey,
+          'OCREngine': '2',
+          'scale': 'true',
+          'isTable': 'true',
+          'detectOrientation': 'true',
+          'language': 'eng'
+        }
+      }
+    ];
+
+    // Test each configuration
+    for (const config of testConfigurations) {
+      console.log(`🧪 Testing: ${config.name}`);
+      
+      const configResult = {
+        name: config.name,
+        settings: config.settings,
+        success: false,
+        error: null,
+        textLength: 0,
+        quality: 0,
+        validWords: 0,
+        hasCompanyIndicators: false,
+        extractedText: '',
+        preview: '',
+        processingTime: 0,
+        apiResponse: {}
+      };
+
+      try {
+        const configStartTime = Date.now();
+        
+        const formData = new FormData();
+        formData.append('file', fileBuffer, {
+          filename: path.basename(req.file.path),
+          contentType: req.file.mimetype
+        });
+        
+        Object.entries(config.settings).forEach(([key, value]) => {
+          formData.append(key, value);
+        });
+        
+        const response = await fetch('https://api.ocr.space/parse/image', {
+          method: 'POST',
+          body: formData,
+          headers: formData.getHeaders(),
+          timeout: 30000
+        });
+        
+        configResult.processingTime = Date.now() - configStartTime;
+        
+        if (!response.ok) {
+          configResult.error = `HTTP ${response.status}: ${response.statusText}`;
+          results.strategies.push(configResult);
+          continue;
+        }
+        
+        const apiResult = await response.json();
+        configResult.apiResponse = {
+          IsErroredOnProcessing: apiResult.IsErroredOnProcessing,
+          ErrorMessage: apiResult.ErrorMessage,
+          ProcessingTimeInMilliseconds: apiResult.ProcessingTimeInMilliseconds,
+          ParsedResultsCount: apiResult.ParsedResults?.length || 0
+        };
+        
+        if (apiResult.IsErroredOnProcessing) {
+          configResult.error = apiResult.ErrorMessage || 'Unknown OCR processing error';
+          results.strategies.push(configResult);
+          continue;
+        }
+        
+        if (!apiResult.ParsedResults || apiResult.ParsedResults.length === 0) {
+          configResult.error = 'No text detected';
+          results.strategies.push(configResult);
+          continue;
+        }
+        
+        // Extract and analyze text
+        const extractedText = apiResult.ParsedResults
+          .map(page => page.ParsedText || '')
+          .join('\n\n')
+          .trim();
+        
+        const quality = analyzeTextQuality(extractedText);
+        const companyIndicators = checkForCompanyIndicators(extractedText);
+        
+        configResult.success = true;
+        configResult.textLength = extractedText.length;
+        configResult.quality = quality.readableRatio;
+        configResult.validWords = quality.validWordCount;
+        configResult.hasCompanyIndicators = companyIndicators > 0;
+        configResult.extractedText = extractedText;
+        configResult.preview = extractedText.substring(0, 300);
+        
+        console.log(`✅ ${config.name}: ${quality.readableRatio}% quality, ${quality.validWordCount} valid words`);
+        
+      } catch (error) {
+        configResult.error = error.message;
+        console.log(`❌ ${config.name}: ${error.message}`);
+      }
+      
+      results.strategies.push(configResult);
+    }
+
+    // Find best result
+    const successfulResults = results.strategies.filter(r => r.success && r.quality > 15);
+    if (successfulResults.length > 0) {
+      results.bestResult = successfulResults.reduce((best, current) => {
+        const bestScore = (best.quality * 0.7) + (best.validWords * 0.3);
+        const currentScore = (current.quality * 0.7) + (current.validWords * 0.3);
+        return currentScore > bestScore ? current : best;
+      });
+    }
+
+    // Generate recommendations
+    results.recommendations = generateOCRRecommendations(results);
+
+    // Try company extraction on best result
+    if (results.bestResult && results.bestResult.extractedText) {
+      try {
+        const companyNames = extractCompanyNamesEnhanced(results.bestResult.extractedText);
+        results.bestResult.companyExtraction = {
+          found: companyNames.length,
+          companies: companyNames.slice(0, 3) // Top 3 results
+        };
+      } catch (extractError) {
+        results.bestResult.companyExtraction = {
+          found: 0,
+          error: extractError.message
+        };
+      }
+    }
+
+    results.totalProcessingTime = Date.now() - startTime;
+
+    // Cleanup
+    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+
+    res.json({
+      success: true,
+      results: results,
+      summary: {
+        strategiesTested: results.strategies.length,
+        successfulStrategies: results.strategies.filter(s => s.success).length,
+        bestQuality: results.bestResult ? `${results.bestResult.quality}%` : 'None',
+        bestStrategy: results.bestResult ? results.bestResult.name : 'None',
+        companyNamesFound: results.bestResult?.companyExtraction?.found || 0
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Detailed OCR debug error:', error);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // OCR debug endpoint
 app.post('/api/debug-ocr', upload.single('document'), async (req, res) => {
@@ -893,46 +1411,53 @@ app.post('/api/debug-ocr', upload.single('document'), async (req, res) => {
     const startTime = Date.now();
 
     try {
-      let ocrText;
-      let method = 'Unknown';
+      let ocrResult;
       
       if (externalOcrAvailable) {
         try {
-          console.log('🔍 Trying external OCR services...');
-          ocrText = await performExternalOCR(req.file.path, req.file.mimetype);
-          method = 'External OCR Service';
+          console.log('🔍 Trying optimized external OCR services...');
+          ocrResult = await performExternalOCROptimized(req.file.path, req.file.mimetype);
         } catch (externalError) {
-          console.log('⚠️ External OCR failed, trying local OCR...');
+          console.log('⚠️ Optimized external OCR failed, trying local OCR...');
           
           if (localOcrAvailable) {
-            ocrText = await performLocalOCR(req.file.path, req.file.mimetype);
-            method = 'Local OCR (Tesseract)';
+            const ocrText = await performLocalOCR(req.file.path, req.file.mimetype);
+            ocrResult = {
+              text: ocrText,
+              method: 'Local OCR (Tesseract)',
+              quality: analyzeTextQuality(ocrText).readableRatio
+            };
           } else {
             throw new Error(`External OCR failed: ${externalError.message}. Local OCR not available.`);
           }
         }
       } else if (localOcrAvailable) {
-        ocrText = await performLocalOCR(req.file.path, req.file.mimetype);
-        method = 'Local OCR (Tesseract)';
+        const ocrText = await performLocalOCR(req.file.path, req.file.mimetype);
+        ocrResult = {
+          text: ocrText,
+          method: 'Local OCR (Tesseract)',
+          quality: analyzeTextQuality(ocrText).readableRatio
+        };
       } else {
         throw new Error('No OCR services available. Install dependencies: npm install form-data node-fetch');
       }
       
       results.ocrResults = {
         success: true,
-        method: method,
-        textLength: ocrText.length,
-        extractedText: ocrText,
-        preview: ocrText.substring(0, 500),
+        method: ocrResult.method,
+        textLength: ocrResult.text.length,
+        quality: `${ocrResult.quality}%`,
+        extractedText: ocrResult.text,
+        preview: ocrResult.text.substring(0, 500),
         containsTargets: {
-          BitConcepts: ocrText.includes('BitConcepts'),
-          PORVIN: ocrText.includes('PORVIN'),
-          LLC: ocrText.includes('LLC'),
-          Articles: ocrText.toLowerCase().includes('articles')
+          BitConcepts: ocrResult.text.includes('BitConcepts'),
+          PORVIN: ocrResult.text.includes('PORVIN'),
+          LLC: ocrResult.text.includes('LLC'),
+          Articles: ocrResult.text.toLowerCase().includes('articles')
         }
       };
       
-      const companyNames = extractCompanyNamesEnhanced(ocrText);
+      const companyNames = extractCompanyNamesEnhanced(ocrResult.text);
       results.extractionResults = companyNames;
       
     } catch (error) {
@@ -975,7 +1500,7 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const documentText = await parseDocument(req.file.path, req.file.mimetype);
+    const documentText = await parseDocumentWithOptimizedOCR(req.file.path, req.file.mimetype);
     
     const standardResults = extractCompanyNames(documentText);
     const enhancedResults = extractCompanyNamesEnhanced(documentText);
@@ -988,6 +1513,7 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
       rawText: documentText,
       textLength: documentText.length,
       firstChars: documentText.substring(0, 1000),
+      textQuality: analyzeTextQuality(documentText),
       containsBitConcepts: documentText.includes('BitConcepts'),
       containsPorvin: documentText.includes('PORVIN'),
       containsLLC: documentText.includes('LLC'),
@@ -1021,7 +1547,7 @@ app.post('/api/debug-text', upload.single('document'), async (req, res) => {
   }
 });
 
-// Extract company names endpoint
+// Extract company names endpoint with optimized OCR
 app.post('/api/extract-names', upload.single('document'), async (req, res) => {
   try {
     console.log('📥 Extract names request received');
@@ -1032,7 +1558,7 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
 
     console.log('📄 Processing file:', req.file.originalname, `(${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-    const documentText = await parseDocument(req.file.path, req.file.mimetype);
+    const documentText = await parseDocumentWithOptimizedOCR(req.file.path, req.file.mimetype);
     
     let companyOptions = extractCompanyNamesEnhanced(documentText);
     if (companyOptions.length === 0) {
@@ -1048,15 +1574,17 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
       return res.status(400).json({ 
         error: 'Could not extract any company names from document.',
         extractedText: documentText.substring(0, 1000) + '...',
+        textQuality: analyzeTextQuality(documentText),
         suggestion: 'Try the debug endpoints to analyze text extraction:',
         debugEndpoints: {
+          detailedOcrAnalysis: `${req.protocol}://${req.get('host')}/api/debug-detailed-ocr`,
           textAnalysis: `${req.protocol}://${req.get('host')}/api/debug-text`,
           ocrAnalysis: `${req.protocol}://${req.get('host')}/api/debug-ocr`
         },
         troubleshooting: [
           'For scanned documents: Ensure OCR services are configured',
           'Check if document contains company names with entity types (LLC, Inc., etc.)',
-          'Try higher quality scans if using OCR',
+          'Try higher quality scans if using OCR (300+ DPI)',
           'Verify document is not password protected'
         ],
         ocrStatus: {
@@ -1071,8 +1599,9 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
       success: true,
       filename: req.file.originalname,
       documentLength: documentText.length,
+      textQuality: analyzeTextQuality(documentText),
       companyOptions: companyOptions,
-      extractionMethod: `Enhanced multi-pattern content analysis v3.3.0 with external OCR support`,
+      extractionMethod: `Enhanced multi-pattern content analysis v3.4.0 with optimized OCR support`,
       ocrUsed: req.file.mimetype === 'application/pdf' ? 'Attempted if needed' : req.file.mimetype.startsWith('image/') ? 'Yes' : 'No'
     });
 
@@ -1125,7 +1654,7 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
     const { companyId } = req.body;
     if (!companyId) return res.status(400).json({ error: 'Company ID is required' });
 
-    const documentText = await parseDocument(req.file.path, req.file.mimetype);
+    const documentText = await parseDocumentWithOptimizedOCR(req.file.path, req.file.mimetype);
     let companyOptions = extractCompanyNamesEnhanced(documentText);
     if (companyOptions.length === 0) {
       companyOptions = extractCompanyNames(documentText);
@@ -1162,11 +1691,11 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: `BT Company Extractor API v3.3.0 with External OCR Support`,
-    version: '3.3.0',
+    message: `BT Company Extractor API v3.4.0 with Optimized OCR Support`,
+    version: '3.4.0',
     timestamp: new Date().toISOString(),
     features: [
-      ...(externalOcrAvailable ? ['✅ External OCR support enabled (OCR.space/Google Vision)'] : ['⚠️ External OCR not available']),
+      ...(externalOcrAvailable ? ['✅ Optimized OCR.space support with multiple strategies'] : ['⚠️ External OCR not available']),
       ...(localOcrAvailable ? ['✅ Local OCR support enabled (Tesseract)'] : []),
       'Enhanced PDF text extraction with multiple fallback methods',
       'DOCX parsing', 
@@ -1175,20 +1704,23 @@ app.get('/api/health', (req, res) => {
       'PLLC entity recognition',
       'Ultra-aggressive extraction algorithms',
       'Comprehensive debug endpoints',
+      'Text quality analysis',
+      'Intelligent OCR error correction',
       'User selection interface',
       'HubSpot CRM integration'
     ],
     endpoints: [
-      'POST /api/extract-names - Extract company names with OCR support',
+      'POST /api/extract-names - Extract company names with optimized OCR',
       'POST /api/update-company - Update HubSpot with selected name',
       'POST /api/debug-text - Debug document text extraction',
       'POST /api/debug-ocr - Test OCR processing capabilities',
+      'POST /api/debug-detailed-ocr - Comprehensive OCR strategy testing',
       'POST /api/upload-document - Legacy auto-update endpoint'
     ],
     ocrStatus: {
       external: {
         available: externalOcrAvailable,
-        services: ['OCR.space API', 'Google Cloud Vision API'],
+        services: ['OCR.space API (optimized)', 'Google Cloud Vision API'],
         configured: {
           ocrSpace: !!process.env.OCR_SPACE_API_KEY,
           googleVision: !!process.env.GOOGLE_CLOUD_VISION_API_KEY
@@ -1210,15 +1742,16 @@ app.get('/api/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'BT Company Name Extractor API v3.3.0',
-    status: externalOcrAvailable ? 'External OCR Enabled' : 'OCR Services Not Available',
-    description: 'Extract company names from documents with external OCR for scanned PDFs',
+    message: 'BT Company Name Extractor API v3.4.0',
+    status: externalOcrAvailable ? 'Optimized OCR Enabled' : 'OCR Services Not Available',
+    description: 'Extract company names from documents with optimized OCR for scanned PDFs',
     features: [
       'Extract up to 5 company name options',
-      ...(externalOcrAvailable ? ['External OCR for scanned PDFs (OCR.space/Google Vision)'] : []),
+      ...(externalOcrAvailable ? ['Optimized OCR.space with multiple processing strategies'] : []),
       ...(localOcrAvailable ? ['Local OCR processing (Tesseract.js)'] : []),
       'Enhanced PDF parsing with multiple fallback methods',
       'Comprehensive debug endpoints',
+      'Text quality analysis and intelligent cleanup',
       'Articles of Organization support (including scanned)',
       'PLLC entity recognition',
       'Ultra-aggressive extraction algorithms',
@@ -1227,7 +1760,7 @@ app.get('/', (req, res) => {
       'HubSpot CRM integration'
     ],
     ocrSetup: !externalOcrAvailable ? {
-      instructions: 'To enable external OCR for scanned PDFs:',
+      instructions: 'To enable optimized OCR for scanned PDFs:',
       steps: [
         'Install dependencies: npm install form-data node-fetch',
         'Optional: Set OCR_SPACE_API_KEY environment variable',
@@ -1236,10 +1769,16 @@ app.get('/', (req, res) => {
       ],
       note: 'OCR.space provides a free testing key for basic functionality'
     } : {
-      status: 'OCR services are configured and ready',
+      status: 'Optimized OCR services are configured and ready',
       availableServices: [
-        ...(process.env.OCR_SPACE_API_KEY ? ['OCR.space API'] : ['OCR.space API (free testing key)']),
+        ...(process.env.OCR_SPACE_API_KEY ? ['OCR.space API (custom key)'] : ['OCR.space API (free testing key)']),
         ...(process.env.GOOGLE_CLOUD_VISION_API_KEY ? ['Google Cloud Vision API'] : [])
+      ],
+      strategies: [
+        'High-Resolution Engine 2 (Best for Articles)',
+        'Engine 1 Alternative',
+        'Table Detection Mode',
+        'No Auto-Scaling (Raw Processing)'
       ]
     }
   });
@@ -1251,24 +1790,26 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log('🚀 BT Company Extractor v3.3.0 server started');
+  console.log('🚀 BT Company Extractor v3.4.0 server started');
   console.log(`📍 Running on port ${PORT}`);
   console.log(`🔑 HubSpot token configured: ${!!process.env.HUBSPOT_ACCESS_TOKEN}`);
   console.log(`🌐 External OCR Status: ${externalOcrAvailable ? 'ENABLED' : 'DISABLED'}`);
   console.log(`🔍 Local OCR Status: ${localOcrAvailable ? 'ENABLED' : 'DISABLED'}`);
   console.log('🌐 Available endpoints:');
   console.log('   GET  /api/health');
-  console.log('   POST /api/extract-names (with OCR support)');
+  console.log('   POST /api/extract-names (with optimized OCR support)');
   console.log('   POST /api/update-company');
   console.log('   POST /api/debug-text');
   console.log('   POST /api/debug-ocr');
+  console.log('   POST /api/debug-detailed-ocr (NEW - comprehensive analysis)');
   console.log('   POST /api/upload-document (legacy)');
   
   if (externalOcrAvailable) {
-    console.log('✨ External OCR ready for scanned PDFs!');
+    console.log('✨ Optimized OCR ready for scanned PDFs!');
     console.log(`📡 OCR.space: ${process.env.OCR_SPACE_API_KEY ? 'Custom key' : 'Free testing key'}`);
     console.log(`📡 Google Vision: ${process.env.GOOGLE_CLOUD_VISION_API_KEY ? 'Configured' : 'Not configured'}`);
+    console.log('🔧 OCR Strategies: 4 different configurations for optimal results');
   } else {
-    console.log('💡 To enable external OCR: npm install form-data node-fetch');
+    console.log('💡 To enable optimized OCR: npm install form-data node-fetch');
   }
 });
