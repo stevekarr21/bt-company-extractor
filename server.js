@@ -85,35 +85,100 @@ async function performOCR(filePath, mimetype) {
     if (mimetype === 'application/pdf') {
       console.log('📄 Converting PDF pages to images for OCR...');
       
-      const convert = pdf2pic.fromPath(filePath, {
-        density: 300,
-        saveFilename: "page",
-        savePath: tempDir,
-        format: "png",
-        width: 2000,
-        height: 2000
-      });
+      // Try multiple pdf2pic configurations
+      const configs = [
+        {
+          density: 300,
+          saveFilename: "page",
+          savePath: tempDir,
+          format: "png",
+          width: 2000,
+          height: 2000
+        },
+        {
+          density: 150,
+          saveFilename: "page_low",
+          savePath: tempDir,
+          format: "jpeg",
+          width: 1500,
+          height: 1500
+        },
+        {
+          density: 200,
+          saveFilename: "page_med",
+          savePath: tempDir,
+          format: "png"
+        }
+      ];
       
-      for (let page = 1; page <= 3; page++) {
+      let conversionSuccessful = false;
+      
+      for (let configIndex = 0; configIndex < configs.length; configIndex++) {
+        const config = configs[configIndex];
+        console.log(`🔄 Trying PDF conversion config ${configIndex + 1}:`, config);
+        
         try {
-          const result = await convert(page, { responseType: "image" });
-          if (result.path) {
-            imagePaths.push(result.path);
-            console.log(`📸 Converted page ${page} to image:`, result.path);
+          const convert = pdf2pic.fromPath(filePath, config);
+          
+          for (let page = 1; page <= 5; page++) {
+            try {
+              console.log(`📄 Converting page ${page} with config ${configIndex + 1}...`);
+              const result = await convert(page, { responseType: "image" });
+              
+              if (result && result.path && fs.existsSync(result.path)) {
+                imagePaths.push(result.path);
+                console.log(`✅ Successfully converted page ${page}:`, result.path);
+                conversionSuccessful = true;
+              } else if (result && result.base64) {
+                // Handle base64 response
+                const imagePath = path.join(tempDir, `page_${page}_${Date.now()}.png`);
+                const imageBuffer = Buffer.from(result.base64, 'base64');
+                fs.writeFileSync(imagePath, imageBuffer);
+                imagePaths.push(imagePath);
+                console.log(`✅ Successfully converted page ${page} from base64:`, imagePath);
+                conversionSuccessful = true;
+              } else {
+                console.log(`⚠️ Page ${page} conversion returned invalid result:`, result);
+              }
+            } catch (pageError) {
+              console.log(`⚠️ Page ${page} conversion failed with config ${configIndex + 1}:`, pageError.message);
+              if (page === 1) {
+                // If first page fails, try next config
+                break;
+              }
+              // If not first page, might just be end of document
+              if (imagePaths.length > 0) {
+                break; // We got some pages, stop here
+              }
+            }
           }
-        } catch (pageError) {
-          console.log(`⚠️ Page ${page} conversion failed:`, pageError.message);
-          break;
+          
+          if (conversionSuccessful) {
+            console.log(`✅ PDF conversion successful with config ${configIndex + 1}`);
+            break; // Exit config loop if we got some images
+          }
+          
+        } catch (configError) {
+          console.log(`❌ Config ${configIndex + 1} failed entirely:`, configError.message);
+          continue; // Try next config
         }
       }
+      
+      if (!conversionSuccessful) {
+        console.log('❌ All PDF conversion configs failed');
+        throw new Error('Failed to convert PDF to images with any configuration. PDF might be corrupted, password-protected, or in an unsupported format.');
+      }
+      
     } else if (mimetype.startsWith('image/')) {
       imagePaths.push(filePath);
       console.log('📸 Processing image file directly');
     }
     
     if (imagePaths.length === 0) {
-      throw new Error('No images to process for OCR');
+      throw new Error('No images to process for OCR - PDF conversion failed');
     }
+    
+    console.log(`📸 Successfully prepared ${imagePaths.length} images for OCR processing`);
     
     let allOCRText = '';
     
