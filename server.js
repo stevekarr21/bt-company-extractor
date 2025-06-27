@@ -17,11 +17,26 @@ try {
   pdf2pic = require('pdf2pic');
   sharp = require('sharp');
   ocrAvailable = true;
-  console.log('✅ OCR dependencies loaded successfully');
+  console.log('✅ Local OCR dependencies loaded successfully');
 } catch (error) {
-  console.log('⚠️ OCR dependencies not available:', error.message);
-  console.log('📝 To enable OCR for scanned PDFs, install: npm install tesseract.js pdf2pic sharp');
+  console.log('⚠️ Local OCR dependencies not available:', error.message);
+  console.log('📝 To enable local OCR: npm install tesseract.js pdf2pic sharp');
   ocrAvailable = false;
+}
+
+// External OCR dependencies
+let FormData, fetch;
+let externalOcrAvailable = false;
+
+try {
+  FormData = require('form-data');
+  fetch = require('node-fetch');
+  externalOcrAvailable = true;
+  console.log('✅ External OCR dependencies available');
+} catch (error) {
+  console.log('⚠️ External OCR dependencies not available:', error.message);
+  console.log('📝 To enable external OCR: npm install form-data node-fetch');
+  externalOcrAvailable = false;
 }
 
 dotenv.config();
@@ -29,8 +44,10 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting BT Company Extractor v3.2.1 with Enhanced PDF Parsing');
-console.log(`🔍 OCR Support: ${ocrAvailable ? 'ENABLED' : 'DISABLED (install dependencies to enable)'}`);
+console.log('🚀 Starting BT Company Extractor v3.2.1 with External OCR Support');
+console.log(`🔍 Local OCR Status: ${ocrAvailable ? 'ENABLED' : 'DISABLED (install dependencies to enable)'}`);
+console.log(`🌐 External OCR Status: ${externalOcrAvailable ? 'AVAILABLE' : 'DISABLED (install dependencies to enable)'}`);
+console.log(`📡 OCR API Keys: OCR.space=${!!process.env.OCR_SPACE_API_KEY}, Google Vision=${!!process.env.GOOGLE_CLOUD_VISION_API_KEY}`);;
 
 // Middleware
 app.use(cors());
@@ -374,20 +391,36 @@ async function parsePdfWithFallbacks(filePath) {
     console.log('❌ Method 3 failed:', error.message);
   }
 
-  console.log('🔄 Attempting PDF parsing method 4: OCR (if available)');
+  console.log('🔄 Attempting PDF parsing method 4: External OCR Services');
+  console.log('📸 This PDF appears to be a scanned image - using external OCR...');
+  
+  try {
+    // Use external OCR service (works reliably on any platform)
+    const ocrText = await performExternalOCR(filePath, 'application/pdf');
+    if (ocrText && ocrText.length > 20) {
+      console.log('✅ Method 4 (External OCR) successful, extracted text length:', ocrText.length);
+      return ocrText;
+    }
+    console.log('⚠️ Method 4 (External OCR) produced insufficient text');
+  } catch (error) {
+    console.log('❌ Method 4 (External OCR) failed:', error.message);
+  }
+
+  // Local OCR fallback (if available)
   if (ocrAvailable) {
+    console.log('🔄 Attempting PDF parsing method 5: Local OCR (fallback)');
     try {
       const ocrText = await performOCR(filePath, 'application/pdf');
       if (ocrText && ocrText.length > 20) {
-        console.log('✅ Method 4 (OCR) successful, extracted text length:', ocrText.length);
+        console.log('✅ Method 5 (Local OCR) successful, extracted text length:', ocrText.length);
         return ocrText;
       }
-      console.log('⚠️ Method 4 (OCR) produced insufficient text');
+      console.log('⚠️ Method 5 (Local OCR) produced insufficient text');
     } catch (error) {
-      console.log('❌ Method 4 (OCR) failed:', error.message);
+      console.log('❌ Method 5 (Local OCR) failed:', error.message);
     }
   } else {
-    console.log('⚠️ OCR not available for Method 4');
+    console.log('⚠️ Local OCR not available');
   }
 
   // Enhanced error message with specific guidance
@@ -397,20 +430,24 @@ async function parsePdfWithFallbacks(filePath) {
     
     Current status:
     - Standard PDF text extraction: Failed
-    - Enhanced buffer scanning: Failed
-    - OCR processing: ${ocrAvailable ? 'Available but failed (likely due to platform limitations)' : 'Not configured'}
+    - Enhanced buffer scanning: Failed  
+    - External OCR services: ${process.env.OCR_SPACE_API_KEY || process.env.GOOGLE_CLOUD_VISION_API_KEY ? 'Available but failed' : 'Not configured'}
+    - Local OCR processing: ${ocrAvailable ? 'Available but failed (likely due to platform limitations)' : 'Not configured'}
     
-    Solutions:
-    1. Convert PDF to DOCX using Adobe Acrobat or Google Docs
-    2. Use online OCR services (like Google Drive OCR)
-    3. Take screenshots and upload as images
-    4. Manual text entry
-    5. Try a different PDF viewer's "Export as Text" feature
+    Solutions for automatic processing:
+    1. Configure OCR.space API (free tier available):
+       - Set environment variable: OCR_SPACE_API_KEY
+       - Sign up at https://ocr.space/ocrapi
+    2. Configure Google Cloud Vision API:
+       - Set environment variable: GOOGLE_CLOUD_VISION_API_KEY  
+       - Enable Vision API in Google Cloud Console
+    3. Install local OCR dependencies: npm install tesseract.js pdf2pic sharp
+    4. Use higher quality document scans (300+ DPI)
     
-    For Articles of Organization specifically:
-    - These documents are often scanned images
-    - Try uploading the document to Google Drive and converting to Google Docs
-    - Then export as DOCX and upload that instead`;
+    For immediate processing:
+    - Convert to DOCX format before upload
+    - Use higher quality scans
+    - Ensure document is not password protected`;
 
   throw new Error(errorMessage);
 }
@@ -436,11 +473,17 @@ async function parseDocument(filePath, mimetype) {
       case 'image/png':
       case 'image/jpeg':
       case 'image/jpg':
-        if (!ocrAvailable) {
-          throw new Error('Image processing requires OCR dependencies. Install with: npm install tesseract.js pdf2pic sharp');
-        }
         console.log('📸 Processing image file with OCR...');
-        text = await performOCR(filePath, mimetype);
+        // Try external OCR first, then local OCR if available
+        try {
+          text = await performExternalOCR(filePath, mimetype);
+        } catch (externalError) {
+          console.log('⚠️ External OCR failed, trying local OCR...');
+          if (!ocrAvailable) {
+            throw new Error('Image processing requires OCR. External OCR failed and local OCR not available. Install local OCR with: npm install tesseract.js pdf2pic sharp');
+          }
+          text = await performOCR(filePath, mimetype);
+        }
         break;
       default:
         throw new Error('Unsupported file type');
@@ -863,9 +906,12 @@ if (ocrAvailable) {
       const startTime = Date.now();
 
       try {
-        const ocrText = await performOCR(req.file.path, req.file.mimetype);
+        // Try external OCR first
+        console.log('🔍 Trying external OCR services...');
+        const ocrText = await performExternalOCR(req.file.path, req.file.mimetype);
         results.ocrResults = {
           success: true,
+          method: 'External OCR Service',
           textLength: ocrText.length,
           extractedText: ocrText,
           preview: ocrText.substring(0, 500),
@@ -877,14 +923,49 @@ if (ocrAvailable) {
           }
         };
         
+        // Try extraction on OCR results
         const companyNames = extractCompanyNamesEnhanced(ocrText);
         results.extractionResults = companyNames;
         
-      } catch (error) {
-        results.ocrResults = {
-          success: false,
-          error: error.message
-        };
+      } catch (externalError) {
+        console.log('⚠️ External OCR failed, trying local OCR...');
+        
+        if (ocrAvailable) {
+          try {
+            const ocrText = await performOCR(req.file.path, req.file.mimetype);
+            results.ocrResults = {
+              success: true,
+              method: 'Local OCR (Tesseract)',
+              textLength: ocrText.length,
+              extractedText: ocrText,
+              preview: ocrText.substring(0, 500),
+              containsTargets: {
+                BitConcepts: ocrText.includes('BitConcepts'),
+                PORVIN: ocrText.includes('PORVIN'),
+                LLC: ocrText.includes('LLC'),
+                Articles: ocrText.toLowerCase().includes('articles')
+              }
+            };
+            
+            const companyNames = extractCompanyNamesEnhanced(ocrText);
+            results.extractionResults = companyNames;
+            
+          } catch (localError) {
+            results.ocrResults = {
+              success: false,
+              method: 'Both external and local OCR failed',
+              externalError: externalError.message,
+              localError: localError.message
+            };
+          }
+        } else {
+          results.ocrResults = {
+            success: false,
+            method: 'External OCR failed, local OCR not available',
+            externalError: externalError.message,
+            suggestion: 'Configure OCR_SPACE_API_KEY or GOOGLE_CLOUD_VISION_API_KEY environment variables'
+          };
+        }
       }
 
       results.processingTime = Date.now() - startTime;
