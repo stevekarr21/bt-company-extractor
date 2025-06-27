@@ -297,7 +297,7 @@ function calculateConfidence(match, fullText, baseConfidence, cleanName) {
   if (nameLength > 50) confidence -= 10;
   
   // Boost for common business words
-  if /(solutions|services|systems|technologies|consulting|industries|enterprises|group|partners)/i.test(cleanName)) {
+  if (/(solutions|services|systems|technologies|consulting|industries|enterprises|group|partners)/i.test(cleanName)) {
     confidence += 3;
   }
   
