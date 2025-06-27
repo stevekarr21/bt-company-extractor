@@ -87,7 +87,7 @@ const upload = multer({
   }
 });
 
-// External OCR using OCR.space API
+// External OCR using OCR.space API (FIXED file handling)
 async function performExternalOCR(filePath, mimetype) {
   if (!externalOcrAvailable) {
     throw new Error('External OCR dependencies not available. Install: npm install form-data node-fetch');
@@ -101,8 +101,15 @@ async function performExternalOCR(filePath, mimetype) {
     
     console.log('📡 Using OCR.space API for text extraction...');
     
+    // Read file into buffer first (fixes stream issue)
+    const fileBuffer = fs.readFileSync(filePath);
+    console.log(`📄 File read into buffer: ${fileBuffer.length} bytes`);
+    
     const formData = new FormData();
-    formData.append('file', fs.createReadStream(filePath));
+    formData.append('file', fileBuffer, {
+      filename: path.basename(filePath),
+      contentType: mimetype
+    });
     formData.append('apikey', ocrApiKey);
     formData.append('language', 'eng');
     formData.append('isOverlayRequired', 'false');
@@ -111,11 +118,15 @@ async function performExternalOCR(filePath, mimetype) {
     formData.append('isTable', 'false');
     formData.append('OCREngine', '2'); // OCR Engine 2 for better accuracy
     
+    console.log('📡 Sending request to OCR.space API...');
+    
     const response = await fetch('https://api.ocr.space/parse/image', {
       method: 'POST',
       body: formData,
       headers: formData.getHeaders()
     });
+    
+    console.log(`📡 OCR API response status: ${response.status}`);
     
     if (!response.ok) {
       throw new Error(`OCR API request failed: ${response.status} ${response.statusText}`);
@@ -123,6 +134,11 @@ async function performExternalOCR(filePath, mimetype) {
     
     const result = await response.json();
     console.log('📡 OCR.space API response received');
+    console.log('📊 OCR Response structure:', {
+      IsErroredOnProcessing: result.IsErroredOnProcessing,
+      ParsedResultsCount: result.ParsedResults?.length || 0,
+      ErrorMessage: result.ErrorMessage
+    });
     
     if (result.IsErroredOnProcessing) {
       throw new Error(`OCR processing error: ${result.ErrorMessage || 'Unknown error'}`);
