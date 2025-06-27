@@ -1,4 +1,3 @@
-// server.js - Version 3.1.0 - Fixed Articles of Organization Extraction
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
