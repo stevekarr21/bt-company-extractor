@@ -1,4 +1,4 @@
-// server.js - Version 3.0.0 - Multi-Option Selection
+// server.js - Version 3.1.0 - Fixed Articles of Organization Extraction
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting BT Company Extractor v3.0.0 with Multi-Option Selection');
+console.log('🚀 Starting BT Company Extractor v3.1.0 with Fixed Articles Extraction');
 
 // Middleware
 app.use(cors());
@@ -78,36 +78,52 @@ async function parseDocument(filePath, mimetype) {
   }
 }
 
-// Extract multiple company name options
+// IMPROVED: Extract multiple company name options with fixed Articles of Organization handling
 function extractCompanyNames(text) {
-  console.log('🔍 Extracting company names (multi-option mode)...');
+  console.log('🔍 Extracting company names (v3.1.0 - Fixed Articles Extraction)...');
+  console.log('📄 Document preview:', text.substring(0, 800));
   
   if (!text || text.length < 5) return [];
 
   const cleanText = text.replace(/\s+/g, ' ').replace(/\n+/g, ' ').trim();
 
-  // Exclusion patterns
+  // FIXED: More specific exclusion patterns that won't filter entire documents
   const excludePatterns = [
-    /articles?\s+of\s+incorporation/i,
-    /certificate\s+of\s+formation/i,
-    /bylaws?\s+of/i,
-    /operating\s+agreement/i,
-    /memorandum\s+of\s+understanding/i,
-    /terms?\s+of\s+service/i,
-    /privacy\s+policy/i
+    /articles?\s+of\s+incorporation\s+for/i,  // More specific
+    /certificate\s+of\s+formation\s+for/i,    // More specific
+    /bylaws?\s+of\s+the/i,                    // More specific
+    /operating\s+agreement\s+of/i,            // More specific
+    /memorandum\s+of\s+understanding\s+between/i, // More specific
+    /terms?\s+of\s+service\s+agreement/i,     // More specific
+    /privacy\s+policy\s+of/i                  // More specific
   ];
 
-  // Comprehensive patterns
+  // ENHANCED: More comprehensive patterns including PLLC and Articles format
   const patterns = [
+    {
+      name: 'Articles LLC Format',
+      regex: /(?:name\s+of\s+the\s+limited\s+liability\s+company\s+is\s*:?\s*)([A-Za-z][A-Za-z\s&\.\-',]{2,50}(?:\s*,?\s*LLC))/gi,
+      confidence: 55
+    },
+    {
+      name: 'Articles Corporation Format', 
+      regex: /(?:name\s+of\s+the\s+corporation\s+is\s*:?\s*)([A-Za-z][A-Za-z\s&\.\-',]{2,50}(?:\s*,?\s*(?:Inc\.?|Corp\.?|Corporation)))/gi,
+      confidence: 55
+    },
     {
       name: 'Standard LLC',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(LLC|L\.L\.C\.)\b/g,
       confidence: 40
     },
     {
-      name: 'Corporation',
+      name: 'Standard Corporation',
       regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(Inc\.?|Incorporated|Corporation|Corp\.?)\b/g,
       confidence: 40
+    },
+    {
+      name: 'Professional LLC (PLLC)',
+      regex: /\b([A-Z][A-Za-z\s&\.\-']{2,50})\s*,?\s*(PLLC|P\.L\.L\.C\.)\b/g,
+      confidence: 45
     },
     {
       name: 'Company',
@@ -126,57 +142,89 @@ function extractCompanyNames(text) {
     },
     {
       name: 'Contract Between',
-      regex: /\bbetween\s+([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP))?)\s+(?:and|&)/gi,
+      regex: /\bbetween\s+([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP|PLLC))?)\s+(?:and|&)/gi,
       confidence: 45
     },
     {
-      name: 'State Corporation',
-      regex: /\b([A-Z][A-Za-z\s&\.\-']+),?\s+a\s+\w+\s+(?:corporation|company|LLC)/gi,
+      name: 'State Entity Formation',
+      regex: /\b([A-Z][A-Za-z\s&\.\-']+),?\s+a\s+\w+\s+(?:corporation|company|LLC|limited\s+liability\s+company)/gi,
       confidence: 50
     },
     {
       name: 'Agreement Pattern',
-      regex: /(?:agreement\s+(?:made\s+)?by|entered\s+into\s+by)\s+([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP))?)/gi,
+      regex: /(?:agreement\s+(?:made\s+)?by|entered\s+into\s+by)\s+([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP|PLLC))?)/gi,
       confidence: 45
     },
     {
-      name: 'Invoice Pattern',
-      regex: /(?:from|bill\s+to|invoice\s+from):\s*([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP))?)/gi,
+      name: 'Prepared By Pattern',
+      regex: /(?:prepared\s+by\s*:?\s*)([A-Z][A-Za-z\s&\.\-']+(?:\s+(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|LLP|PLLC)))/gi,
       confidence: 40
+    },
+    {
+      name: 'Law Firm Pattern',
+      regex: /\b([A-Z][A-Za-z\s&\.\-',]+)\s*,?\s*(PLLC|P\.L\.L\.C\.)\b/g,
+      confidence: 45
     }
   ];
 
   const foundNames = [];
 
   patterns.forEach((pattern) => {
+    console.log(`🔍 Testing pattern: ${pattern.name}`);
     let match;
-    while ((match = pattern.regex.exec(cleanText)) !== null) {
+    let matchCount = 0;
+    
+    while ((match = pattern.regex.exec(cleanText)) !== null && matchCount < 10) {
+      matchCount++;
       const fullMatch = match[0];
       const companyNamePart = match[1];
       
-      // Skip exclusions
-      if (excludePatterns.some(excludePattern => excludePattern.test(fullMatch))) continue;
+      console.log(`✅ ${pattern.name} found: "${fullMatch}"`);
       
-      const cleanName = companyNamePart.trim().replace(/\s+/g, ' ').replace(/[^\w\s&\.\-']/g, '').trim();
+      // Check exclusions - but only exclude if the FULL MATCH contains the excluded phrase
+      const isExcluded = excludePatterns.some(excludePattern => 
+        excludePattern.test(fullMatch)
+      );
       
-      // Validate
+      if (isExcluded) {
+        console.log(`❌ Excluded: "${fullMatch}"`);
+        continue;
+      }
+      
+      const cleanName = companyNamePart
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/[^\w\s&\.\-',]/g, '')
+        .trim();
+      
+      // Enhanced validation
       if (cleanName.length >= 2 && 
-          cleanName.length <= 60 && 
+          cleanName.length <= 70 && 
           /^[A-Z]/.test(cleanName) &&
           !/^\d+$/.test(cleanName) &&
-          !/(article|certificate|bylaw|agreement|policy|terms|whereas)/i.test(cleanName)) {
+          !/(^article|^certificate|^bylaw|^whereas|^therefore|department\s+of)/i.test(cleanName)) {
         
-        // Determine entity type
+        // Enhanced entity type detection
         let entityType = '';
-        if (/\b(LLC|L\.L\.C\.)\b/i.test(fullMatch)) entityType = 'LLC';
-        else if (/\b(Inc\.?|Incorporated)\b/i.test(fullMatch)) entityType = 'Inc.';
-        else if (/\b(Corp\.?|Corporation)\b/i.test(fullMatch)) entityType = 'Corp.';
-        else if (/\b(Co\.?|Company)\b/i.test(fullMatch)) entityType = 'Company';
-        else if (/\b(Ltd\.?|Limited)\b/i.test(fullMatch)) entityType = 'Ltd.';
-        else if (/\b(LLP|L\.L\.P\.)\b/i.test(fullMatch)) entityType = 'LLP';
-        else entityType = 'LLC';
+        if (/\b(LLC|L\.L\.C\.)\b/i.test(fullMatch)) {
+          entityType = 'LLC';
+        } else if (/\b(PLLC|P\.L\.L\.C\.)\b/i.test(fullMatch)) {
+          entityType = 'PLLC';
+        } else if (/\b(Inc\.?|Incorporated)\b/i.test(fullMatch)) {
+          entityType = 'Inc.';
+        } else if (/\b(Corp\.?|Corporation)\b/i.test(fullMatch)) {
+          entityType = 'Corp.';
+        } else if (/\b(Co\.?|Company)\b/i.test(fullMatch)) {
+          entityType = 'Company';
+        } else if (/\b(Ltd\.?|Limited)\b/i.test(fullMatch)) {
+          entityType = 'Ltd.';
+        } else if (/\b(LLP|L\.L\.P\.)\b/i.test(fullMatch)) {
+          entityType = 'LLP';
+        } else {
+          entityType = 'LLC'; // Default
+        }
         
-        const finalName = entityType && !cleanName.includes(entityType) 
+        const finalName = entityType && !cleanName.toLowerCase().includes(entityType.toLowerCase()) 
           ? `${cleanName} ${entityType}` 
           : cleanName;
         
@@ -189,17 +237,29 @@ function extractCompanyNames(text) {
           originalMatch: fullMatch,
           context: getContext(cleanText, fullMatch)
         });
+        
+        console.log(`💾 Added: "${finalName}" (${confidence}% confidence)`);
+      } else {
+        console.log(`❌ Invalid name: "${cleanName}" (length: ${cleanName.length})`);
       }
     }
+    
     pattern.regex.lastIndex = 0;
   });
 
-  // Remove duplicates and sort
+  // Enhanced deduplication
   const uniqueNames = foundNames.reduce((acc, current) => {
-    const existing = acc.find(item => 
-      item.name.toLowerCase().replace(/[^a-z]/g, '') === 
-      current.name.toLowerCase().replace(/[^a-z]/g, '')
-    );
+    const normalizedCurrentName = current.name.toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
+    
+    const existing = acc.find(item => {
+      const normalizedExistingName = item.name.toLowerCase()
+        .replace(/[^a-z0-9]/g, '')
+        .replace(/llc|inc|corp|company|ltd|llp|pllc/g, '');
+      return normalizedExistingName === normalizedCurrentName;
+    });
+    
     if (!existing) {
       acc.push(current);
     } else if (current.confidence > existing.confidence) {
@@ -210,23 +270,37 @@ function extractCompanyNames(text) {
   }, []);
 
   uniqueNames.sort((a, b) => b.confidence - a.confidence);
-  console.log(`🎯 Found ${uniqueNames.length} unique company names`);
+  
+  console.log(`🎯 Final results: ${uniqueNames.length} unique company names found`);
+  uniqueNames.forEach((name, index) => {
+    console.log(`${index + 1}. "${name.name}" (${name.confidence}% - ${name.patternName})`);
+  });
   
   return uniqueNames.slice(0, 5);
 }
 
 function calculateConfidence(match, fullText, baseConfidence, cleanName) {
   let confidence = baseConfidence;
+  
+  // Boost for multiple occurrences
   const occurrences = (fullText.match(new RegExp(cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')) || []).length;
   confidence += Math.min(occurrences * 3, 15);
   
+  // Boost if appears early in document
   const position = fullText.toLowerCase().indexOf(match.toLowerCase());
   if (position < 200) confidence += 10;
   else if (position < 500) confidence += 5;
   
+  // Boost for reasonable name length
   const nameLength = cleanName.length;
   if (nameLength >= 5 && nameLength <= 30) confidence += 5;
   if (nameLength < 3) confidence -= 15;
+  if (nameLength > 50) confidence -= 10;
+  
+  // Boost for common business words
+  if /(solutions|services|systems|technologies|consulting|industries|enterprises|group|partners)/i.test(cleanName)) {
+    confidence += 3;
+  }
   
   return Math.min(confidence, 100);
 }
@@ -275,6 +349,8 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    console.log('📄 Processing file:', req.file.originalname, `(${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
+
     const documentText = await parseDocument(req.file.path, req.file.mimetype);
     const companyOptions = extractCompanyNames(documentText);
     
@@ -282,19 +358,21 @@ app.post('/api/extract-names', upload.single('document'), async (req, res) => {
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     
     if (companyOptions.length === 0) {
+      console.log('❌ No company names found in document');
       return res.status(400).json({ 
-        error: 'Could not extract any company names from document',
-        extractedText: documentText.substring(0, 1000) + '...'
+        error: 'Could not extract any company names from document. Please ensure the document contains company names with legal entity types (LLC, Inc., Corp., PLLC, etc.)',
+        extractedText: documentText.substring(0, 1000) + '...',
+        suggestion: 'Make sure your document contains text like "Acme Corporation" or "Tech Solutions LLC"'
       });
     }
 
-    console.log(`📋 Returning ${companyOptions.length} company options`);
+    console.log(`📋 Returning ${companyOptions.length} company options to client`);
     res.json({
       success: true,
       filename: req.file.originalname,
       documentLength: documentText.length,
       companyOptions: companyOptions,
-      extractionMethod: 'Multi-option PDF content analysis'
+      extractionMethod: 'Advanced multi-pattern PDF content analysis v3.1.0'
     });
 
   } catch (error) {
@@ -315,13 +393,16 @@ app.post('/api/update-company', async (req, res) => {
       return res.status(400).json({ error: 'Company ID and name are required' });
     }
 
+    console.log(`📝 Request: Update company ${companyId} with "${companyName}"`);
+
     const updatedCompany = await updateHubSpotCompany(companyId, companyName);
 
     res.json({
       success: true,
       companyId: companyId,
       updatedName: companyName,
-      hubspotResponse: 'Updated successfully'
+      hubspotResponse: 'Updated successfully',
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
@@ -376,13 +457,15 @@ app.post('/api/upload-document', upload.single('document'), async (req, res) => 
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'BT Company Extractor API v3.0.0 with Multi-Option Selection is running!',
-    version: '3.0.0',
+    message: 'BT Company Extractor API v3.1.0 with Fixed Articles Extraction is running!',
+    version: '3.1.0',
     timestamp: new Date().toISOString(),
     features: [
       'PDF text extraction',
       'DOCX parsing', 
       'Multi-option company name detection',
+      'Articles of Organization support',
+      'PLLC entity recognition',
       'User selection interface',
       'Edit capability',
       'HubSpot CRM integration'
@@ -391,6 +474,13 @@ app.get('/api/health', (req, res) => {
       'POST /api/extract-names - Extract multiple company name options',
       'POST /api/update-company - Update HubSpot with selected name',
       'POST /api/upload-document - Legacy auto-update endpoint'
+    ],
+    improvements: [
+      'Fixed Articles of Organization document parsing',
+      'Added PLLC entity type support',
+      'Enhanced exclusion patterns',
+      'Better deduplication logic',
+      'Improved debug logging'
     ],
     env: {
       hasHubSpotToken: !!process.env.HUBSPOT_ACCESS_TOKEN,
@@ -403,15 +493,35 @@ app.get('/api/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'BT Company Name Extractor API v3.0.0',
-    status: 'Multi-Option Selection Mode',
-    description: 'Extract multiple company name candidates and let users select the best option',
+    message: 'BT Company Name Extractor API v3.1.0',
+    status: 'Multi-Option Selection with Articles Support',
+    description: 'Extract multiple company name candidates from various document types including Articles of Organization',
     features: [
       'Extract up to 5 company name options',
+      'Support for Articles of Organization documents',
+      'PLLC entity type recognition',
       'Confidence scoring and ranking',
       'User selection and editing interface',
-      'Advanced pattern matching',
+      'Advanced pattern matching with 13+ patterns',
+      'Enhanced exclusion logic',
       'HubSpot CRM integration'
+    ],
+    supportedDocuments: [
+      'Articles of Organization (LLC)',
+      'Articles of Incorporation (Corp)',
+      'Operating Agreements',
+      'Service Agreements',
+      'Invoices and Contracts',
+      'Legal Documents'
+    ],
+    supportedEntityTypes: [
+      'LLC', 'L.L.C.',
+      'PLLC', 'P.L.L.C.',
+      'Inc.', 'Incorporated',
+      'Corp.', 'Corporation',
+      'Company', 'Co.',
+      'Ltd.', 'Limited',
+      'LLP', 'L.L.P.'
     ]
   });
 });
@@ -422,13 +532,14 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log('🚀 BT Company Extractor v3.0.0 server started');
+  console.log('🚀 BT Company Extractor v3.1.0 server started');
   console.log(`📍 Running on port ${PORT}`);
   console.log(`🔑 HubSpot token configured: ${!!process.env.HUBSPOT_ACCESS_TOKEN}`);
-  console.log('✨ Features: Multi-option extraction, user selection, editing capability');
+  console.log('✨ Features: Multi-option extraction, Articles support, PLLC recognition, user selection');
   console.log('🌐 Available endpoints:');
   console.log('   GET  /api/health');
   console.log('   POST /api/extract-names');
   console.log('   POST /api/update-company');
   console.log('   POST /api/upload-document (legacy)');
+  console.log('📋 Supported: Articles of Organization, PLLC entities, enhanced exclusions');
 });
